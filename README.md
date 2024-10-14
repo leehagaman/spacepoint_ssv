@@ -1,1 +1,1 @@
-# next_gen_photon_reco
+Some tests for next generation photon reconstruction in MicroBooNE and other LArTPCs
