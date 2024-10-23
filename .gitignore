@@ -1,2 +1,4 @@
 *.root
 *.DS_Store
+*.json
+*.zip
