@@ -1,4 +1,7 @@
 import numpy as np
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.neighbors import NearestNeighbors, KernelDensity
+
 
 # making detector boundary points
 
@@ -94,9 +97,6 @@ x_width = tpc_max_x - tpc_min_x
 expanded_detector_boundary_points = generate_box_edge_points(tpc_min_x - x_width, tpc_max_x + x_width, tpc_min_y, tpc_max_y, tpc_min_z, tpc_max_z, num_points_per_edge=100)
 
 
-from sklearn.cluster import KMeans
-from sklearn.neighbors import NearestNeighbors
-
 def fps_sampling(points, n_samples):
     """
     Perform an optimized Farthest Point Sampling (FPS) using NumPy.
@@ -174,3 +174,54 @@ def get_min_dists(points_A, points_B):
     distances, _ = nbrs.kneighbors(points_A)
     return distances
 
+
+def remove_outliers(points, min_neighbors=5, radius=None, k=10):
+    """
+    Remove outliers from point cloud based on local density.
+    
+    Args:
+        points: numpy array of shape (N, D) where N is number of points, D is dimensionality
+        min_neighbors: minimum number of neighbors required to keep a point
+        radius: radius for neighborhood search. If None, use k-nearest neighbors approach
+        k: number of neighbors to consider if radius is None
+        
+    Returns:
+        Filtered point cloud without outliers
+    """
+    # Choose neighborhood calculation approach
+    if radius is not None:
+        # Radius-based approach
+        nbrs = NearestNeighbors(radius=radius).fit(points)
+        distances, indices = nbrs.radius_neighbors(points)
+        # Count neighbors for each point (excluding the point itself)
+        neighbor_count = np.array([len(idx) - 1 for idx in indices])
+    else:
+        # k-nearest neighbors approach
+        nbrs = NearestNeighbors(n_neighbors=k+1).fit(points)  # +1 because point is its own neighbor
+        distances, indices = nbrs.kneighbors(points)
+        # Calculate average distance to k nearest neighbors
+        avg_distances = np.mean(distances[:, 1:], axis=1)  # Exclude self (first neighbor)
+        # Points with large average distances are outliers
+        threshold = np.mean(avg_distances) + 2 * np.std(avg_distances)
+        neighbor_count = np.where(avg_distances <= threshold, k, 0)
+    
+    # Keep points with sufficient neighbors
+    mask = neighbor_count >= min_neighbors
+    filtered_points = points[mask]
+    
+    return filtered_points
+
+
+
+def energy_weighted_density_sampling(points, energies, n_samples=1000):
+
+    # Sample directly proportional to energy values
+    # Normalize energies to use as probabilities
+    probs = energies / energies.sum()
+    
+    # Sample based on energy values
+    sampled_indices = np.random.choice(len(points), n_samples, replace=False, p=probs)
+    
+    sampled_points = points[sampled_indices]
+    
+    return sampled_points
