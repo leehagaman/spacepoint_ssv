@@ -215,6 +215,11 @@ def remove_outliers(points, min_neighbors=5, radius=None, k=10):
 
 def energy_weighted_density_sampling(points, energies, n_samples=1000):
 
+    print("points: ", points)
+    print("len(points): ", len(points))
+
+    if len(points) == 0 or n_samples == 0: return np.array([])
+
     # Sample directly proportional to energy values
     # Normalize energies to use as probabilities
     probs = energies / energies.sum()
