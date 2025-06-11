@@ -106,7 +106,7 @@ def fps_sampling(points, n_samples):
     :return: indices of sampled points
     """
     N = points.shape[0]
-    if N == 0: return np.array([])
+    if N == 0: return np.empty((0, 3))
     sampled_indices = np.zeros(n_samples, dtype=int)
     distances = np.full(N, np.inf)
 
@@ -136,7 +136,7 @@ def fps_clustering_downsample(points, n_samples, debug=False):
     :return: downsampled point cloud
     """
 
-    if len(points) == 0 or n_samples == 0: return np.array([])
+    if len(points) == 0 or n_samples == 0: return np.empty((0, 3))
 
     if debug:
         print(f"downsampling {points.shape[0]} points to {n_samples} points")
@@ -215,10 +215,10 @@ def remove_outliers(points, min_neighbors=5, radius=None, k=10):
 
 def energy_weighted_density_sampling(points, energies, n_samples=1000):
 
-    print("points: ", points)
-    print("len(points): ", len(points))
+    if len(points) == 0 or n_samples == 0: return np.empty((0, 3))
 
-    if len(points) == 0 or n_samples == 0: return np.array([])
+    if n_samples > len(points):
+        n_samples = len(points)
 
     # Sample directly proportional to energy values
     # Normalize energies to use as probabilities
