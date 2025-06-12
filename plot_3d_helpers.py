@@ -92,9 +92,332 @@ def generate_box_edge_points(x_min, x_max, y_min, y_max, z_min, z_max, num_point
     return all_points
 
 
-detector_boundary_points = generate_box_edge_points(tpc_min_x, tpc_max_x, tpc_min_y, tpc_max_y, tpc_min_z, tpc_max_z, num_points_per_edge=100)
-x_width = tpc_max_x - tpc_min_x
-expanded_detector_boundary_points = generate_box_edge_points(tpc_min_x - x_width, tpc_max_x + x_width, tpc_min_y, tpc_max_y, tpc_min_z, tpc_max_z, num_points_per_edge=100)
+def plot_event(index, 
+               Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, true_gamma1_EDep_spacepoints, 
+               true_gamma2_EDep_spacepoints, other_particles_EDep_spacepoints,
+               downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
+               downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints,
+               real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
+               real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints,
+               reco_nu_vtx, true_nu_vtx,
+               include_non_downsampled_points=True):
+
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    detector_boundary_points = generate_box_edge_points(tpc_min_x, tpc_max_x, tpc_min_y, tpc_max_y, tpc_min_z, tpc_max_z, num_points_per_edge=100)
+    x_width = tpc_max_x - tpc_min_x
+    expanded_detector_boundary_points = generate_box_edge_points(tpc_min_x - x_width, tpc_max_x + x_width, tpc_min_y, tpc_max_y, tpc_min_z, tpc_max_z, num_points_per_edge=100)
+
+
+    fig = make_subplots(rows=1, cols=1, specs=[[{'type': 'scene'}]])
+
+    # these are only added to set the camera at a better position
+    fig.add_trace(go.Scatter3d(
+        x=expanded_detector_boundary_points[:, 2],
+        y=expanded_detector_boundary_points[:, 0],
+        z=expanded_detector_boundary_points[:, 1],
+        mode='markers',
+        marker=dict(
+            size=0.2,
+            color='black',
+            opacity=0.8
+        ),
+        name='Expanded TPC Boundary'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=detector_boundary_points[:, 2],
+        y=detector_boundary_points[:, 0],
+        z=detector_boundary_points[:, 1],
+        mode='markers',
+        marker=dict(
+            size=1,
+            color='black',
+            opacity=0.8
+        ),
+        name='TPC Boundary'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=[reco_nu_vtx[index][2]],
+        y=[reco_nu_vtx[index][0]],
+        z=[reco_nu_vtx[index][1]],
+        mode='markers',
+        marker=dict(size=10, color='purple', opacity=1),
+        name='Reco Neutrino Vertex',
+        visible='legendonly'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=[true_nu_vtx[index][2]],
+        y=[true_nu_vtx[index][0]],
+        z=[true_nu_vtx[index][1]],
+        mode='markers',
+        marker=dict(size=10, color='green', opacity=1),
+        name='True Neutrino Vertex',
+        visible='legendonly'
+
+    ))
+
+
+    if include_non_downsampled_points:
+        fig.add_trace(go.Scatter3d(
+            x=Tcluster_spacepoints[index][:, 2],
+            y=Tcluster_spacepoints[index][:, 0],
+            z=Tcluster_spacepoints[index][:, 1],
+            mode='markers',
+            marker=dict(
+                size=1,
+                color="blue",
+                opacity=0.8
+            ),
+            name='Tcluster Spacepoints',
+            visible='legendonly'
+        ))
+
+    fig.add_trace(go.Scatter3d(
+        x=downsampled_Tcluster_spacepoints[index][:, 2],
+        y=downsampled_Tcluster_spacepoints[index][:, 0],
+        z=downsampled_Tcluster_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color="blue",
+            opacity=0.8
+        ),
+        name='Downsampled Tcluster Spacepoints',
+        visible='legendonly'
+    ))
+
+    if include_non_downsampled_points:
+        fig.add_trace(go.Scatter3d(
+            x=Trec_spacepoints[index][:, 2],
+            y=Trec_spacepoints[index][:, 0],
+            z=Trec_spacepoints[index][:, 1],
+            mode='markers',
+            marker=dict(
+                size=1,
+                color='red',
+                opacity=0.8
+            ),
+            name='Trec Spacepoints',
+            visible='legendonly'
+        ))
+
+    fig.add_trace(go.Scatter3d(
+        x=downsampled_Trec_spacepoints[index][:, 2],
+        y=downsampled_Trec_spacepoints[index][:, 0],
+        z=downsampled_Trec_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='red',
+            opacity=0.8
+        ),
+        name='Downsampled Trec Spacepoints',
+        visible='legendonly'
+    ))
+
+    if include_non_downsampled_points:
+        fig.add_trace(go.Scatter3d(
+            x=TrueEDep_spacepoints[index][:, 2],
+            y=TrueEDep_spacepoints[index][:, 0],
+            z=TrueEDep_spacepoints[index][:, 1],
+            mode='markers',
+            marker=dict(
+                size=1,
+                color='orange',
+                opacity=0.8
+            ),
+            name='TrueEDep Spacepoints',
+            visible='legendonly'
+        ))
+
+        fig.add_trace(go.Scatter3d(
+            x=true_gamma1_EDep_spacepoints[index][:, 2],
+            y=true_gamma1_EDep_spacepoints[index][:, 0],
+            z=true_gamma1_EDep_spacepoints[index][:, 1],
+            mode='markers',
+            marker=dict(
+                size=1,
+                color='lightgreen',
+                opacity=0.8
+            ),
+            name='Real Gamma 1 EDep Spacepoints',
+            visible='legendonly'
+        ))
+
+        fig.add_trace(go.Scatter3d(
+            x=true_gamma2_EDep_spacepoints[index][:, 2],
+            y=true_gamma2_EDep_spacepoints[index][:, 0],
+            z=true_gamma2_EDep_spacepoints[index][:, 1],
+            mode='markers',
+            marker=dict(
+                size=1,
+                color='green',
+                opacity=0.8
+            ),
+            name='Real Gamma 2 EDep Spacepoints',
+            visible='legendonly'
+        ))
+
+        fig.add_trace(go.Scatter3d(
+            x=other_particles_EDep_spacepoints[index][:, 2],
+            y=other_particles_EDep_spacepoints[index][:, 0],
+            z=other_particles_EDep_spacepoints[index][:, 1],
+            mode='markers',
+            marker=dict(
+                size=1,
+                color='brown',
+                opacity=0.8
+            ),
+            name='Real Other Particles EDep Spacepoints',
+            visible='legendonly'
+        ))
+
+    fig.add_trace(go.Scatter3d(
+        x=downsampled_TrueEDep_spacepoints[index][:, 2],
+        y=downsampled_TrueEDep_spacepoints[index][:, 0],
+        z=downsampled_TrueEDep_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='orange',
+            opacity=0.8
+        ),
+        name='Downsampled TrueEDep Spacepoints',
+        visible='legendonly'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_nu_reco_nu_downsampled_spacepoints[index][:, 2],
+        y=real_nu_reco_nu_downsampled_spacepoints[index][:, 0],
+        z=real_nu_reco_nu_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='orange',
+            opacity=0.8
+        ),
+        name='Real Nu Reco Nu Spacepoints',
+        visible='legendonly'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 2],
+        y=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 0],
+        z=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='red',
+            opacity=0.8
+        ),
+        name='Real Nu Reco Cosmic Spacepoints',
+        visible='legendonly'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 2],
+        y=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 0],
+        z=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='brown',
+            opacity=0.8
+        ),
+        name='Real Cosmic Reco Nu Spacepoints',
+        visible='legendonly'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 2],
+        y=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 0],
+        z=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='blue',
+            opacity=0.8
+        ),
+        name='Real Cosmic Reco Cosmic Spacepoints',
+        visible='legendonly'
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_gamma1_downsampled_spacepoints[index][:, 2],
+        y=real_gamma1_downsampled_spacepoints[index][:, 0],
+        z=real_gamma1_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3, 
+            color='lightgreen',
+            opacity=0.8
+        ),
+        name='Real Gamma 1 Downsampled Spacepoints',
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_gamma2_downsampled_spacepoints[index][:, 2],
+        y=real_gamma2_downsampled_spacepoints[index][:, 0],
+        z=real_gamma2_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='green',
+            opacity=0.8
+        ),
+        name='Real Gamma 2 Downsampled Spacepoints',
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_other_particles_downsampled_spacepoints[index][:, 2],
+        y=real_other_particles_downsampled_spacepoints[index][:, 0],
+        z=real_other_particles_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='brown',
+            opacity=0.8
+        ),
+        name='Real Other Particles Downsampled Spacepoints',
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=real_cosmic_downsampled_spacepoints[index][:, 2],
+        y=real_cosmic_downsampled_spacepoints[index][:, 0],
+        z=real_cosmic_downsampled_spacepoints[index][:, 1],
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='blue',
+            opacity=0.8
+        ),
+        name='Real Cosmic Downsampled Spacepoints',
+    ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='z',
+            yaxis_title='x',
+            zaxis_title='y',
+            aspectratio=dict(
+                x=5,
+                y=3,
+                z=1
+            ),
+        ),
+        width=2000,
+        height=1200,
+        autosize=False,
+        scene_camera=dict(
+            eye=dict(x=-1.5, y=-1.5, z=1.5)
+        )
+    )
+
+    fig.show(renderer="browser")
 
 
 def fps_sampling(points, n_samples):

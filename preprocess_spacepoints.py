@@ -4,11 +4,13 @@ import numpy as np
 from tqdm import tqdm
 import pickle
 import argparse
+import pandas as pd
 
-from plot_3d_helpers import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling
+from plot_3d_helpers import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling, plot_event
 
 def get_basic_info(f):
-    # loads the basic information from the root file
+
+    # loads basic information from the root file
 
     rse = f["wcpselection"]["T_eval"].arrays(["run", "subrun", "event"], library="np")
     true_nu_vtx = f["wcpselection"]["T_eval"].arrays(["truth_vtxX", "truth_vtxY", "truth_vtxZ"], library="np")
@@ -16,7 +18,101 @@ def get_basic_info(f):
     reco_nu_vtx = f["wcpselection"]["T_PFeval"].arrays(["reco_nuvtxX", "reco_nuvtxY", "reco_nuvtxZ"], library="np")
     reco_nu_vtx = np.stack([reco_nu_vtx["reco_nuvtxX"], reco_nu_vtx["reco_nuvtxY"], reco_nu_vtx["reco_nuvtxZ"]], axis=-1)
 
-    return rse, true_nu_vtx, reco_nu_vtx
+    basic_info_df = pd.DataFrame({
+        "run": rse["run"],
+        "subrun": rse["subrun"],
+        "event": rse["event"],
+        "true_nu_vtx_x": true_nu_vtx[:, 0],
+        "true_nu_vtx_y": true_nu_vtx[:, 1],
+        "true_nu_vtx_z": true_nu_vtx[:, 2],
+        "reco_nu_vtx_x": reco_nu_vtx[:, 0],
+        "reco_nu_vtx_y": reco_nu_vtx[:, 1],
+        "reco_nu_vtx_z": reco_nu_vtx[:, 2],
+    })
+
+    print(basic_info_df.head())
+
+    return true_nu_vtx, reco_nu_vtx, basic_info_df
+
+
+def get_true_gamma_info(f, num_events):
+
+    print("getting true gamma information")
+
+    # these variables will be used to define signal vs background
+    # only includes gammas from a pi0 (primary or non-primary)
+    true_num_gamma = []
+    true_gamma_energies = []
+    true_gamma_pairconversion_xs = []
+    true_gamma_pairconversion_ys = []
+    true_gamma_pairconversion_zs = []
+    true_num_gamma_pairconvert_in_FV = []
+    true_num_gamma_pairconvert_in_FV_20_MeV = []
+
+    wc_geant_dic = f["wcpselection"]["T_PFeval"].arrays(["truth_id", "truth_mother", "truth_pdg", "truth_startMomentum", "truth_startXYZT", "truth_endXYZT"], library="np")
+
+    for event_i in tqdm(range(num_events)):
+
+        num_particles = len(wc_geant_dic["truth_id"][event_i])
+                
+        curr_true_num_gamma = 0
+        curr_true_gamma_energies = []
+        curr_true_gamma_pairconversion_xs = []
+        curr_true_gamma_pairconversion_ys = []
+        curr_true_gamma_pairconversion_zs = []
+        curr_true_num_gamma_pairconvert_in_FV = 0
+        curr_true_num_gamma_pairconvert_in_FV_20_MeV = 0
+
+        pi0_ids = []
+        for i in range(num_particles):
+            if wc_geant_dic["truth_pdg"][event_i][i] == 111:
+                pi0_ids.append(wc_geant_dic["truth_id"][event_i][i])
+
+        pi0_gamma_ids = []
+        for i in range(num_particles):
+            if wc_geant_dic["truth_mother"][event_i][i] in pi0_ids: # this is a daughter of a pi0
+                if wc_geant_dic["truth_pdg"][event_i][i] == 22: # this is a gamma from a pi0
+                    curr_true_num_gamma += 1
+                    curr_true_gamma_energies.append(wc_geant_dic["truth_startMomentum"][event_i][i][3])
+                    pi0_gamma_ids.append(wc_geant_dic["truth_id"][event_i][i])
+
+        # looking for pair conversion points, allowing for the possibility of Compton scattering
+        for i in range(num_particles):
+            if wc_geant_dic["truth_id"][event_i][i] in pi0_gamma_ids: # pi0 -> gamma
+
+                gamma_in_descendants = True # might not be true at the start, but we'll check
+
+                # loop until we get through the compton scatters to the pair conversion
+                while gamma_in_descendants:
+                    curr_id = wc_geant_dic["truth_id"][event_i][i]
+                    descendants_ids = []
+                    descendants_pdgs = []
+                    for j in range(num_particles):
+                        if wc_geant_dic["truth_mother"][event_i][j] == curr_id: # pi0 -> gamma -> this particle
+                            descendants_ids.append(wc_geant_dic["truth_id"][event_i][j])
+                            descendants_pdgs.append(wc_geant_dic["truth_pdg"][event_i][j])
+                    if 22 in descendants_pdgs: # found a compton scatter, loop to consider that photon
+                        curr_id = descendants_ids[descendants_pdgs.index(22)]
+                    else: # no compton scatter, we're done, it's either a pair conversion or photoelectric absorption or a Geant tree deletion
+                        gamma_in_descendants = False
+
+                if len(descendants_ids) == 2 and wc_geant_dic["truth_pdg"][event_i][descendants_ids[0]] == 22 and wc_geant_dic["truth_pdg"][event_i][descendants_ids[1]] == 22:
+                    # found a pair conversion, pi0 -> gamma -> e+ e-
+                    curr_true_gamma_pairconversion_xs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_ids[0]][0])
+                    curr_true_gamma_pairconversion_ys.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_ids[0]][1])
+                    curr_true_gamma_pairconversion_zs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_ids[0]][2])
+                for descendant_id in descendants_ids:
+                    if wc_geant_dic["truth_pdg"][event_i][descendant_id] == 22: # found a pi0 -> gamma -> gamma
+                        curr_true_num_gamma_pairconvert_in_FV += 1
+                        if wc_geant_dic["truth_startMomentum"][event_i][descendant_id][3] > 20:
+                            curr_true_num_gamma_pairconvert_in_FV_20_MeV += 1
+
+    # TODO: continue here
+
+
+                    
+                    
+
 
 
 def get_geant_points(f, num_interpolated_points=5, num_events=None):
@@ -58,6 +154,7 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None):
                 daughters_of_primary_pi0_ids.append(wc_geant_dic["truth_id"][event_i][i])
                 daughters_of_primary_pi0_pdgs.append(wc_geant_dic["truth_pdg"][event_i][i])
         if not (len(daughters_of_primary_pi0_pdgs) == 2 and daughters_of_primary_pi0_pdgs[0] == 22 and daughters_of_primary_pi0_pdgs[1] == 22):
+            # either rare decay, or one photon was lost from the Geant tree, skip this event
             true_gamma_1_geant_points.append(np.array([]))
             true_gamma_2_geant_points.append(np.array([]))
             other_particles_geant_points.append(np.array([]))
@@ -141,9 +238,12 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None):
                 continue
             for i in range(num_interpolated_points + 1):
                 curr_true_gamma_1_geant_points.append(np.array([
-                    first_daughter_descendants_start_xs[particle_i] + (first_daughter_descendants_end_xs[particle_i] - first_daughter_descendants_start_xs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
-                    first_daughter_descendants_start_ys[particle_i] + (first_daughter_descendants_end_ys[particle_i] - first_daughter_descendants_start_ys[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
-                    first_daughter_descendants_start_zs[particle_i] + (first_daughter_descendants_end_zs[particle_i] - first_daughter_descendants_start_zs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
+                    first_daughter_descendants_start_xs[particle_i]
+                      + (first_daughter_descendants_end_xs[particle_i] - first_daughter_descendants_start_xs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
+                    first_daughter_descendants_start_ys[particle_i]
+                      + (first_daughter_descendants_end_ys[particle_i] - first_daughter_descendants_start_ys[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
+                    first_daughter_descendants_start_zs[particle_i]
+                      + (first_daughter_descendants_end_zs[particle_i] - first_daughter_descendants_start_zs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
                 ]))
         if len(curr_true_gamma_1_geant_points) == 0:
             true_gamma_1_geant_points.append(np.array([]))
@@ -157,9 +257,12 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None):
                 continue
             for i in range(num_interpolated_points + 1):
                 curr_true_gamma_2_geant_points.append(np.array([
-                    second_daughter_descendants_start_xs[particle_i] + (second_daughter_descendants_end_xs[particle_i] - second_daughter_descendants_start_xs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
-                    second_daughter_descendants_start_ys[particle_i] + (second_daughter_descendants_end_ys[particle_i] - second_daughter_descendants_start_ys[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
-                    second_daughter_descendants_start_zs[particle_i] + (second_daughter_descendants_end_zs[particle_i] - second_daughter_descendants_start_zs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
+                    second_daughter_descendants_start_xs[particle_i]
+                      + (second_daughter_descendants_end_xs[particle_i] - second_daughter_descendants_start_xs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
+                    second_daughter_descendants_start_ys[particle_i]
+                      + (second_daughter_descendants_end_ys[particle_i] - second_daughter_descendants_start_ys[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
+                    second_daughter_descendants_start_zs[particle_i]
+                      + (second_daughter_descendants_end_zs[particle_i] - second_daughter_descendants_start_zs[particle_i]) * (i + 1) / (num_interpolated_points + 1), 
                 ]))
         if len(curr_true_gamma_2_geant_points) == 0:
             true_gamma_2_geant_points.append(np.array([]))
@@ -281,7 +384,9 @@ def categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_
         other_particles_EDep_spacepoints.append(TrueEDep_spacepoints[event_i][other_mask])    
         other_particles_EDep_spacepoints_edep.append(TrueEDep_spacepoints_edep[event_i][other_mask])
 
-    return true_gamma1_EDep_spacepoints, true_gamma1_EDep_spacepoints_edep, true_gamma2_EDep_spacepoints, true_gamma2_EDep_spacepoints_edep, other_particles_EDep_spacepoints, other_particles_EDep_spacepoints_edep
+    return (true_gamma1_EDep_spacepoints, true_gamma1_EDep_spacepoints_edep, 
+            true_gamma2_EDep_spacepoints, true_gamma2_EDep_spacepoints_edep, 
+            other_particles_EDep_spacepoints, other_particles_EDep_spacepoints_edep)
 
 def downsample_spacepoints(Tcluster_spacepoints, Trec_spacepoints, 
                            TrueEDep_spacepoints, TrueEDep_spacepoints_edep, 
@@ -292,7 +397,6 @@ def downsample_spacepoints(Tcluster_spacepoints, Trec_spacepoints,
                            close_to_reco_nu_vtx_threshold=200,
                            recalculate_downsampling=True):
 
-        
     print("downsampling spacepoints")
 
     downsampled_Tcluster_spacepoints = {}
@@ -388,329 +492,6 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
     return (real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
             real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints)
 
-def plot_event(index, 
-               Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, true_gamma1_EDep_spacepoints, 
-               true_gamma2_EDep_spacepoints, other_particles_EDep_spacepoints,
-               downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-               downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints,
-               real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
-               real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints,
-               reco_nu_vtx, true_nu_vtx,
-               include_non_downsampled_points=True):
-
-    from plot_3d_helpers import expanded_detector_boundary_points, detector_boundary_points
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-
-    fig = make_subplots(rows=1, cols=1, specs=[[{'type': 'scene'}]])
-
-    # these are only added to set the camera at a better position
-    fig.add_trace(go.Scatter3d(
-        x=expanded_detector_boundary_points[:, 2],
-        y=expanded_detector_boundary_points[:, 0],
-        z=expanded_detector_boundary_points[:, 1],
-        mode='markers',
-        marker=dict(
-            size=0.2,
-            color='black',
-            opacity=0.8
-        ),
-        name='Expanded TPC Boundary'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=detector_boundary_points[:, 2],
-        y=detector_boundary_points[:, 0],
-        z=detector_boundary_points[:, 1],
-        mode='markers',
-        marker=dict(
-            size=1,
-            color='black',
-            opacity=0.8
-        ),
-        name='TPC Boundary'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=[reco_nu_vtx[index][2]],
-        y=[reco_nu_vtx[index][0]],
-        z=[reco_nu_vtx[index][1]],
-        mode='markers',
-        marker=dict(size=10, color='purple', opacity=1),
-        name='Reco Neutrino Vertex',
-        visible='legendonly'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=[true_nu_vtx[index][2]],
-        y=[true_nu_vtx[index][0]],
-        z=[true_nu_vtx[index][1]],
-        mode='markers',
-        marker=dict(size=10, color='green', opacity=1),
-        name='True Neutrino Vertex',
-        visible='legendonly'
-
-    ))
-
-
-    if include_non_downsampled_points:
-        fig.add_trace(go.Scatter3d(
-            x=Tcluster_spacepoints[index][:, 2],
-            y=Tcluster_spacepoints[index][:, 0],
-            z=Tcluster_spacepoints[index][:, 1],
-            mode='markers',
-            marker=dict(
-                size=1,
-                color="blue",
-                opacity=0.8
-            ),
-            name='Tcluster Spacepoints',
-            visible='legendonly'
-        ))
-
-    fig.add_trace(go.Scatter3d(
-        x=downsampled_Tcluster_spacepoints[index][:, 2],
-        y=downsampled_Tcluster_spacepoints[index][:, 0],
-        z=downsampled_Tcluster_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color="blue",
-            opacity=0.8
-        ),
-        name='Downsampled Tcluster Spacepoints',
-        visible='legendonly'
-    ))
-
-    if include_non_downsampled_points:
-        fig.add_trace(go.Scatter3d(
-            x=Trec_spacepoints[index][:, 2],
-            y=Trec_spacepoints[index][:, 0],
-            z=Trec_spacepoints[index][:, 1],
-            mode='markers',
-            marker=dict(
-                size=1,
-                color='red',
-                opacity=0.8
-            ),
-            name='Trec Spacepoints',
-            visible='legendonly'
-        ))
-
-    fig.add_trace(go.Scatter3d(
-        x=downsampled_Trec_spacepoints[index][:, 2],
-        y=downsampled_Trec_spacepoints[index][:, 0],
-        z=downsampled_Trec_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='red',
-            opacity=0.8
-        ),
-        name='Downsampled Trec Spacepoints',
-        visible='legendonly'
-    ))
-
-    if include_non_downsampled_points:
-        fig.add_trace(go.Scatter3d(
-            x=TrueEDep_spacepoints[index][:, 2],
-            y=TrueEDep_spacepoints[index][:, 0],
-            z=TrueEDep_spacepoints[index][:, 1],
-            mode='markers',
-            marker=dict(
-                size=1,
-                color='orange',
-                opacity=0.8
-            ),
-            name='TrueEDep Spacepoints',
-            visible='legendonly'
-        ))
-
-        fig.add_trace(go.Scatter3d(
-            x=true_gamma1_EDep_spacepoints[index][:, 2],
-            y=true_gamma1_EDep_spacepoints[index][:, 0],
-            z=true_gamma1_EDep_spacepoints[index][:, 1],
-            mode='markers',
-            marker=dict(
-                size=1,
-                color='lightgreen',
-                opacity=0.8
-            ),
-            name='Real Gamma 1 EDep Spacepoints',
-            visible='legendonly'
-        ))
-
-        fig.add_trace(go.Scatter3d(
-            x=true_gamma2_EDep_spacepoints[index][:, 2],
-            y=true_gamma2_EDep_spacepoints[index][:, 0],
-            z=true_gamma2_EDep_spacepoints[index][:, 1],
-            mode='markers',
-            marker=dict(
-                size=1,
-                color='green',
-                opacity=0.8
-            ),
-            name='Real Gamma 2 EDep Spacepoints',
-            visible='legendonly'
-        ))
-
-        fig.add_trace(go.Scatter3d(
-            x=other_particles_EDep_spacepoints[index][:, 2],
-            y=other_particles_EDep_spacepoints[index][:, 0],
-            z=other_particles_EDep_spacepoints[index][:, 1],
-            mode='markers',
-            marker=dict(
-                size=1,
-                color='brown',
-                opacity=0.8
-            ),
-            name='Real Other Particles EDep Spacepoints',
-            visible='legendonly'
-        ))
-
-    fig.add_trace(go.Scatter3d(
-        x=downsampled_TrueEDep_spacepoints[index][:, 2],
-        y=downsampled_TrueEDep_spacepoints[index][:, 0],
-        z=downsampled_TrueEDep_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='orange',
-            opacity=0.8
-        ),
-        name='Downsampled TrueEDep Spacepoints',
-        visible='legendonly'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_nu_reco_nu_downsampled_spacepoints[index][:, 2],
-        y=real_nu_reco_nu_downsampled_spacepoints[index][:, 0],
-        z=real_nu_reco_nu_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='orange',
-            opacity=0.8
-        ),
-        name='Real Nu Reco Nu Spacepoints',
-        visible='legendonly'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 2],
-        y=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 0],
-        z=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='red',
-            opacity=0.8
-        ),
-        name='Real Nu Reco Cosmic Spacepoints',
-        visible='legendonly'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 2],
-        y=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 0],
-        z=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='brown',
-            opacity=0.8
-        ),
-        name='Real Cosmic Reco Nu Spacepoints',
-        visible='legendonly'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 2],
-        y=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 0],
-        z=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='blue',
-            opacity=0.8
-        ),
-        name='Real Cosmic Reco Cosmic Spacepoints',
-        visible='legendonly'
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_gamma1_downsampled_spacepoints[index][:, 2],
-        y=real_gamma1_downsampled_spacepoints[index][:, 0],
-        z=real_gamma1_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3, 
-            color='lightgreen',
-            opacity=0.8
-        ),
-        name='Real Gamma 1 Downsampled Spacepoints',
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_gamma2_downsampled_spacepoints[index][:, 2],
-        y=real_gamma2_downsampled_spacepoints[index][:, 0],
-        z=real_gamma2_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='green',
-            opacity=0.8
-        ),
-        name='Real Gamma 2 Downsampled Spacepoints',
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_other_particles_downsampled_spacepoints[index][:, 2],
-        y=real_other_particles_downsampled_spacepoints[index][:, 0],
-        z=real_other_particles_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='brown',
-            opacity=0.8
-        ),
-        name='Real Other Particles Downsampled Spacepoints',
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=real_cosmic_downsampled_spacepoints[index][:, 2],
-        y=real_cosmic_downsampled_spacepoints[index][:, 0],
-        z=real_cosmic_downsampled_spacepoints[index][:, 1],
-        mode='markers',
-        marker=dict(
-            size=3,
-            color='blue',
-            opacity=0.8
-        ),
-        name='Real Cosmic Downsampled Spacepoints',
-    ))
-
-    fig.update_layout(
-        scene=dict(
-            xaxis_title='z',
-            yaxis_title='x',
-            zaxis_title='y',
-            aspectratio=dict(
-                x=5,
-                y=3,
-                z=1
-            ),
-        ),
-        width=2000,
-        height=1200,
-        autosize=False,
-        scene_camera=dict(
-            eye=dict(x=-1.5, y=-1.5, z=1.5)
-        )
-    )
-
-    fig.show(renderer="browser")
-
 
 if __name__ == "__main__":
 
@@ -731,7 +512,7 @@ if __name__ == "__main__":
     print(f"loading file: '{root_filename}'")
     f = uproot.open(root_filename)
 
-    rse, true_nu_vtx, reco_nu_vtx = get_basic_info(f)
+    true_nu_vtx, reco_nu_vtx, basic_info_df = get_basic_info(f)
 
     if args.num_events is None:
         num_events = len(f["wcpselection"]["T_eval"].arrays(["run"], library="np"))
@@ -765,8 +546,8 @@ if __name__ == "__main__":
     downsampled_other_particles_EDep_spacepoints = downsampled_spacepoint_outputs[5]
 
     categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-                                                                                                downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints, 
-                                                                                                num_events)
+                                                                downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints, 
+                                                                num_events)
 
     real_nu_reco_nu_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[0]
     real_nu_reco_cosmic_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[1]
@@ -782,7 +563,8 @@ if __name__ == "__main__":
                    Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, true_gamma1_EDep_spacepoints, true_gamma2_EDep_spacepoints, other_particles_EDep_spacepoints,
                    downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
                    downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints,
-                   real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
+                   real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, 
+                   real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
                    real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints,
                    reco_nu_vtx, true_nu_vtx)
         
