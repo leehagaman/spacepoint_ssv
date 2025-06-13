@@ -8,17 +8,20 @@ import pandas as pd
 
 from plot_3d_helpers import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling, plot_event
 
-def get_basic_info(f):
 
-    # loads basic information from the root file
+def get_true_gamma_info(f, num_events):
 
-    rse = f["wcpselection"]["T_eval"].arrays(["run", "subrun", "event"], library="np")
-    true_nu_vtx = f["wcpselection"]["T_eval"].arrays(["truth_vtxX", "truth_vtxY", "truth_vtxZ"], library="np")
+    # loads non-spacepoint information from the root file, including RSE, true nu vtx, reco nu vtx, and true gamma info
+
+    print("getting true gamma information")
+
+    rse = f["wcpselection"]["T_eval"].arrays(["run", "subrun", "event"], library="np", entry_start=0, entry_stop=num_events)
+    true_nu_vtx = f["wcpselection"]["T_eval"].arrays(["truth_vtxX", "truth_vtxY", "truth_vtxZ"], library="np", entry_start=0, entry_stop=num_events)
     true_nu_vtx = np.stack([true_nu_vtx["truth_vtxX"], true_nu_vtx["truth_vtxY"], true_nu_vtx["truth_vtxZ"]], axis=-1)
-    reco_nu_vtx = f["wcpselection"]["T_PFeval"].arrays(["reco_nuvtxX", "reco_nuvtxY", "reco_nuvtxZ"], library="np")
+    reco_nu_vtx = f["wcpselection"]["T_PFeval"].arrays(["reco_nuvtxX", "reco_nuvtxY", "reco_nuvtxZ"], library="np", entry_start=0, entry_stop=num_events)
     reco_nu_vtx = np.stack([reco_nu_vtx["reco_nuvtxX"], reco_nu_vtx["reco_nuvtxY"], reco_nu_vtx["reco_nuvtxZ"]], axis=-1)
 
-    basic_info_df = pd.DataFrame({
+    true_gamma_info_df = pd.DataFrame({
         "run": rse["run"],
         "subrun": rse["subrun"],
         "event": rse["event"],
@@ -30,15 +33,6 @@ def get_basic_info(f):
         "reco_nu_vtx_z": reco_nu_vtx[:, 2],
     })
 
-    print(basic_info_df.head())
-
-    return true_nu_vtx, reco_nu_vtx, basic_info_df
-
-
-def get_true_gamma_info(f, num_events):
-
-    print("getting true gamma information")
-
     # these variables will be used to define signal vs background
     # only includes gammas from a pi0 (primary or non-primary)
     true_num_gamma = []
@@ -46,6 +40,7 @@ def get_true_gamma_info(f, num_events):
     true_gamma_pairconversion_xs = []
     true_gamma_pairconversion_ys = []
     true_gamma_pairconversion_zs = []
+    true_num_gamma_pairconvert = []
     true_num_gamma_pairconvert_in_FV = []
     true_num_gamma_pairconvert_in_FV_20_MeV = []
 
@@ -60,6 +55,7 @@ def get_true_gamma_info(f, num_events):
         curr_true_gamma_pairconversion_xs = []
         curr_true_gamma_pairconversion_ys = []
         curr_true_gamma_pairconversion_zs = []
+        curr_true_num_gamma_pairconvert = 0
         curr_true_num_gamma_pairconvert_in_FV = 0
         curr_true_num_gamma_pairconvert_in_FV_20_MeV = 0
 
@@ -68,51 +64,78 @@ def get_true_gamma_info(f, num_events):
             if wc_geant_dic["truth_pdg"][event_i][i] == 111:
                 pi0_ids.append(wc_geant_dic["truth_id"][event_i][i])
 
-        pi0_gamma_ids = []
+        primary_or_pi0_gamma_ids = []
         for i in range(num_particles):
-            if wc_geant_dic["truth_mother"][event_i][i] in pi0_ids: # this is a daughter of a pi0
+            if wc_geant_dic["truth_mother"][event_i][i] in pi0_ids or wc_geant_dic["truth_mother"][event_i][i] == 0: # this is a daughter of a pi0 or a primary gamma (most likely from an eta or Delta radiative)
                 if wc_geant_dic["truth_pdg"][event_i][i] == 22: # this is a gamma from a pi0
                     curr_true_num_gamma += 1
                     curr_true_gamma_energies.append(wc_geant_dic["truth_startMomentum"][event_i][i][3])
-                    pi0_gamma_ids.append(wc_geant_dic["truth_id"][event_i][i])
+                    primary_or_pi0_gamma_ids.append(wc_geant_dic["truth_id"][event_i][i])
 
         # looking for pair conversion points, allowing for the possibility of Compton scattering
         for i in range(num_particles):
-            if wc_geant_dic["truth_id"][event_i][i] in pi0_gamma_ids: # pi0 -> gamma
+            if wc_geant_dic["truth_id"][event_i][i] in primary_or_pi0_gamma_ids: # pi0 -> gamma
 
-                gamma_in_descendants = True # might not be true at the start, but we'll check
+                original_gamma_energy = wc_geant_dic["truth_startMomentum"][event_i][i][3] # might decrease after compton scattering
 
                 # loop until we get through the compton scatters to the pair conversion
-                while gamma_in_descendants:
+                while True:
                     curr_id = wc_geant_dic["truth_id"][event_i][i]
                     descendants_ids = []
+                    descendants_indices = []
                     descendants_pdgs = []
                     for j in range(num_particles):
                         if wc_geant_dic["truth_mother"][event_i][j] == curr_id: # pi0 -> gamma -> this particle
                             descendants_ids.append(wc_geant_dic["truth_id"][event_i][j])
+                            descendants_indices.append(j)
                             descendants_pdgs.append(wc_geant_dic["truth_pdg"][event_i][j])
                     if 22 in descendants_pdgs: # found a compton scatter, loop to consider that photon
                         curr_id = descendants_ids[descendants_pdgs.index(22)]
                     else: # no compton scatter, we're done, it's either a pair conversion or photoelectric absorption or a Geant tree deletion
-                        gamma_in_descendants = False
+                        break
 
-                if len(descendants_ids) == 2 and wc_geant_dic["truth_pdg"][event_i][descendants_ids[0]] == 22 and wc_geant_dic["truth_pdg"][event_i][descendants_ids[1]] == 22:
+                if len(descendants_ids) == 2 and ((descendants_pdgs[0] == 11 or descendants_pdgs[1] == -11) or (descendants_pdgs[0] == -11 or descendants_pdgs[1] == 11)):
+                    print("found a pair conversion, pi0 -> gamma -> e+ e-")
                     # found a pair conversion, pi0 -> gamma -> e+ e-
-                    curr_true_gamma_pairconversion_xs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_ids[0]][0])
-                    curr_true_gamma_pairconversion_ys.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_ids[0]][1])
-                    curr_true_gamma_pairconversion_zs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_ids[0]][2])
-                for descendant_id in descendants_ids:
-                    if wc_geant_dic["truth_pdg"][event_i][descendant_id] == 22: # found a pi0 -> gamma -> gamma
+                    curr_true_gamma_pairconversion_xs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][0])
+                    curr_true_gamma_pairconversion_ys.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][1])
+                    curr_true_gamma_pairconversion_zs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][2])
+                    curr_true_num_gamma_pairconvert += 1
+
+                    if -1 < curr_true_gamma_pairconversion_xs[-1] <= 254.3 and -115.0 < curr_true_gamma_pairconversion_ys[-1] <= 117.0 and 0.6 < curr_true_gamma_pairconversion_zs[-1] <= 1036.4:
                         curr_true_num_gamma_pairconvert_in_FV += 1
-                        if wc_geant_dic["truth_startMomentum"][event_i][descendant_id][3] > 20:
+
+                        if original_gamma_energy > 0.02:
                             curr_true_num_gamma_pairconvert_in_FV_20_MeV += 1
 
-    # TODO: continue here
+                else:
+                    print("found a pair conversion, but it's not a pi0 -> gamma -> e+ e-")
+                    print("descendants_pdgs: ", descendants_pdgs)
 
+        true_num_gamma.append(curr_true_num_gamma)
+        true_gamma_energies.append(curr_true_gamma_energies)
+        true_gamma_pairconversion_xs.append(curr_true_gamma_pairconversion_xs)
+        true_gamma_pairconversion_ys.append(curr_true_gamma_pairconversion_ys)
+        true_gamma_pairconversion_zs.append(curr_true_gamma_pairconversion_zs)
+        true_num_gamma_pairconvert.append(curr_true_num_gamma_pairconvert)
+        true_num_gamma_pairconvert_in_FV.append(curr_true_num_gamma_pairconvert_in_FV)
+        true_num_gamma_pairconvert_in_FV_20_MeV.append(curr_true_num_gamma_pairconvert_in_FV_20_MeV)
 
-                    
-                    
+    true_gamma_info_df["true_num_gamma"] = true_num_gamma
+    true_gamma_info_df["true_gamma_energies"] = true_gamma_energies
+    true_gamma_info_df["true_gamma_pairconversion_xs"] = true_gamma_pairconversion_xs
+    true_gamma_info_df["true_gamma_pairconversion_ys"] = true_gamma_pairconversion_ys
+    true_gamma_info_df["true_gamma_pairconversion_zs"] = true_gamma_pairconversion_zs
+    true_gamma_info_df["true_num_gamma_pairconvert"] = true_num_gamma_pairconvert
+    true_gamma_info_df["true_num_gamma_pairconvert_in_FV"] = true_num_gamma_pairconvert_in_FV
+    true_gamma_info_df["true_num_gamma_pairconvert_in_FV_20_MeV"] = true_num_gamma_pairconvert_in_FV_20_MeV
 
+    for col in true_gamma_info_df.columns:
+        print(col)
+        print(true_gamma_info_df[col].head())
+        print()
+
+    return true_nu_vtx, reco_nu_vtx, true_gamma_info_df
 
 
 def get_geant_points(f, num_interpolated_points=5, num_events=None):
@@ -512,12 +535,12 @@ if __name__ == "__main__":
     print(f"loading file: '{root_filename}'")
     f = uproot.open(root_filename)
 
-    true_nu_vtx, reco_nu_vtx, basic_info_df = get_basic_info(f)
-
     if args.num_events is None:
         num_events = len(f["wcpselection"]["T_eval"].arrays(["run"], library="np"))
     else:
         num_events = int(args.num_events)
+
+    true_nu_vtx, reco_nu_vtx, true_gamma_info_df = get_true_gamma_info(f, num_events)
 
     true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points = get_geant_points(f, num_events=num_events)
 
