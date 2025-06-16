@@ -6,7 +6,8 @@ import pickle
 import argparse
 import pandas as pd
 
-from plot_3d_helpers import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling, plot_event
+from helpers.plotting_3d import generate_box_edge_points, plot_event
+from helpers.spacepoint_sampling import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling
 
 
 def get_true_gamma_info(f, num_events):
@@ -72,31 +73,45 @@ def get_true_gamma_info(f, num_events):
                     curr_true_gamma_energies.append(wc_geant_dic["truth_startMomentum"][event_i][i][3])
                     primary_or_pi0_gamma_ids.append(wc_geant_dic["truth_id"][event_i][i])
 
+        # looking for the first point where the photon transfers more than half its energy to daughter charged particles
+        # should be 100% for pair production, but compton scatters can also effectively cause the start of a shower
+        # daughter particles could disappear from the geant tree even if it pair converts, that type of photon won't be included here
+
         # looking for pair conversion points, allowing for the possibility of Compton scattering
         for i in range(num_particles):
-            if wc_geant_dic["truth_id"][event_i][i] in primary_or_pi0_gamma_ids: # pi0 -> gamma
+            if wc_geant_dic["truth_id"][event_i][i] in primary_or_pi0_gamma_ids: # pi0/primary -> gamma
 
-                original_gamma_energy = wc_geant_dic["truth_startMomentum"][event_i][i][3] # might decrease after compton scattering
+                original_gamma_energy = wc_geant_dic["truth_startMomentum"][event_i][i][3]
+                cumulative_deposited_energy = 0
 
-                # loop until we get through the compton scatters to the pair conversion
+                # loop until we deposit enough charged energy, or run out of daughters
                 while True:
                     curr_id = wc_geant_dic["truth_id"][event_i][i]
                     descendants_ids = []
                     descendants_indices = []
                     descendants_pdgs = []
                     for j in range(num_particles):
-                        if wc_geant_dic["truth_mother"][event_i][j] == curr_id: # pi0 -> gamma -> this particle
+                        if wc_geant_dic["truth_mother"][event_i][j] == curr_id: # pi0/primary -> gamma -> this particle
                             descendants_ids.append(wc_geant_dic["truth_id"][event_i][j])
                             descendants_indices.append(j)
                             descendants_pdgs.append(wc_geant_dic["truth_pdg"][event_i][j])
-                    if 22 in descendants_pdgs: # found a compton scatter, loop to consider that photon
+
+                    for descendant_i in range(len(descendants_indices)):
+                        if abs(descendants_pdgs[descendant_i]) == 11: # electron/positron daughter
+                            cumulative_deposited_energy += wc_geant_dic["truth_startMomentum"][event_i][descendants_indices[descendant_i]][3]
+
+                    if cumulative_deposited_energy > original_gamma_energy / 2: # it has deposited enough energy to effectively count as a pair conversion
+                        break
+
+                    if 22 in descendants_pdgs: # found a compton scatter, hasn't deposited enough energy yet, loop to consider that next photon
                         curr_id = descendants_ids[descendants_pdgs.index(22)]
+                        print("doing a compton scatter")
                     else: # no compton scatter, we're done, it's either a pair conversion or photoelectric absorption or a Geant tree deletion
                         break
 
-                if len(descendants_ids) == 2 and ((descendants_pdgs[0] == 11 or descendants_pdgs[1] == -11) or (descendants_pdgs[0] == -11 or descendants_pdgs[1] == 11)):
-                    print("found a pair conversion, pi0 -> gamma -> e+ e-")
-                    # found a pair conversion, pi0 -> gamma -> e+ e-
+                if cumulative_deposited_energy < original_gamma_energy / 2: # weird event, didn't deposit enough energy to count as a pair conversion
+                    print(f"weird event, no daughter photon, but also deposited less than half the energy: {cumulative_deposited_energy} / {original_gamma_energy}")
+                else:
                     curr_true_gamma_pairconversion_xs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][0])
                     curr_true_gamma_pairconversion_ys.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][1])
                     curr_true_gamma_pairconversion_zs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][2])
@@ -108,9 +123,6 @@ def get_true_gamma_info(f, num_events):
                         if original_gamma_energy > 0.02:
                             curr_true_num_gamma_pairconvert_in_FV_20_MeV += 1
 
-                else:
-                    print("found a pair conversion, but it's not a pi0 -> gamma -> e+ e-")
-                    print("descendants_pdgs: ", descendants_pdgs)
 
         true_num_gamma.append(curr_true_num_gamma)
         true_gamma_energies.append(curr_true_gamma_energies)
@@ -130,11 +142,7 @@ def get_true_gamma_info(f, num_events):
     true_gamma_info_df["true_num_gamma_pairconvert_in_FV"] = true_num_gamma_pairconvert_in_FV
     true_gamma_info_df["true_num_gamma_pairconvert_in_FV_20_MeV"] = true_num_gamma_pairconvert_in_FV_20_MeV
 
-    for col in true_gamma_info_df.columns:
-        print(col)
-        print(true_gamma_info_df[col].head())
-        print()
-
+    # returning the vertex information separately, since that will be used for downsampling
     return true_nu_vtx, reco_nu_vtx, true_gamma_info_df
 
 
@@ -542,6 +550,8 @@ if __name__ == "__main__":
 
     true_nu_vtx, reco_nu_vtx, true_gamma_info_df = get_true_gamma_info(f, num_events)
 
+    #print(true_gamma_info_df.head())
+
     true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points = get_geant_points(f, num_events=num_events)
 
     Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, TrueEDep_spacepoints_edep = load_all_spacepoints(f, num_events)
@@ -593,9 +603,12 @@ if __name__ == "__main__":
         
     if not args.no_save:
         print("saving downsampled spacepoints to pickle file")
-        with open("downsampled_spacepoints.pkl", "wb") as f:
-            pickle.dump((downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-                         downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints), f)
+        with open("intermediate_files/downsampled_spacepoints.pkl", "wb") as f:
+            pickle.dump((true_gamma_info_df, 
+                         real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints,
+                         real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints,
+                         real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, 
+                         real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints), f)
 
         print("finished saving")
     
