@@ -4,6 +4,5 @@
 *.zip
 *.pkl
 *.xml
-*.txt
 __pycache__/*
 *.pyc

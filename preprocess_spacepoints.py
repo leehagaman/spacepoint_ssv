@@ -10,7 +10,7 @@ from helpers.plotting_3d import generate_box_edge_points, plot_event
 from helpers.spacepoint_sampling import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling
 
 
-def get_true_gamma_info(f, num_events):
+def get_vtx_and_true_gamma_info(f, num_events):
 
     # loads non-spacepoint information from the root file, including RSE, true nu vtx, reco nu vtx, and true gamma info
 
@@ -110,7 +110,8 @@ def get_true_gamma_info(f, num_events):
                         break
 
                 if cumulative_deposited_energy < original_gamma_energy / 2: # weird event, didn't deposit enough energy to count as a pair conversion
-                    print(f"weird event, no daughter photon, but also deposited less than half the energy: {cumulative_deposited_energy} / {original_gamma_energy}")
+                    #print(f"weird event, no daughter photon, but also deposited less than half the energy: {cumulative_deposited_energy} / {original_gamma_energy}")
+                    pass
                 else:
                     curr_true_gamma_pairconversion_xs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][0])
                     curr_true_gamma_pairconversion_ys.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][1])
@@ -529,7 +530,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pre-processing root file to extract spacepoint information.")
     parser.add_argument('-f', '--file', type=str, required=True, help='Path to root file to pre-process.')
     parser.add_argument('-n', '--num_events', type=str, help='Number of events to process (default is entire file).')
-    parser.add_argument('-p', '--plot_index', type=str, help='Index of an event to plot in 3D.')
     parser.add_argument('-ns', '--no_save', action='store_true', help='Do not save the downsampled spacepoints to a pickle file.')
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -548,7 +548,7 @@ if __name__ == "__main__":
     else:
         num_events = int(args.num_events)
 
-    true_nu_vtx, reco_nu_vtx, true_gamma_info_df = get_true_gamma_info(f, num_events)
+    true_nu_vtx, reco_nu_vtx, true_gamma_info_df = get_vtx_and_true_gamma_info(f, num_events)
 
     #print(true_gamma_info_df.head())
 
@@ -590,16 +590,6 @@ if __name__ == "__main__":
     real_gamma2_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[5]
     real_other_particles_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[6]
     real_cosmic_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[7]
-
-    if args.plot_index is not None:
-        plot_event(int(args.plot_index), 
-                   Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, true_gamma1_EDep_spacepoints, true_gamma2_EDep_spacepoints, other_particles_EDep_spacepoints,
-                   downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-                   downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints,
-                   real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, 
-                   real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
-                   real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints,
-                   reco_nu_vtx, true_nu_vtx)
         
     if not args.no_save:
         print("saving downsampled spacepoints to pickle file")

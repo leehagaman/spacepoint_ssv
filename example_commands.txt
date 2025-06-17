@@ -1,0 +1,3 @@
+python preprocess_spacepoints.py -f input_files/bdt_convert_superunified_bnb_ncpi0_full_spacepoints.root -n 100
+
+python train.py
