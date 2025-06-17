@@ -56,3 +56,14 @@ if __name__ == "__main__":
     print("saving training RSEs to text file")
     np.savetxt('training_files/train_RSEs.txt', train_RSEs, fmt='%d', delimiter=' ', header='run subrun event')
 
+    import torch
+    print("Pytorch version: ", torch.__version__)
+    if torch.backends.mps.is_available():
+        device = torch.device("mps") # Metal Performance Shaders on M-series Macs
+    elif torch.cuda.is_available():
+        device = torch.device("cuda") # CUDA on NVIDIA GPUs
+    else:
+        device = torch.device("cpu") # CPU on other machines
+    print("Using device: ", device)
+
+
