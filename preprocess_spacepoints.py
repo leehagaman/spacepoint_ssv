@@ -474,7 +474,7 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
 
     close_to_true_nu_spacepoint_threshold = 5
     close_to_reco_nu_spacepoint_threshold = 5
-    close_to_true_particcle_spacepoint_threshold = 5
+    close_to_true_particle_spacepoint_threshold = 5
 
     for event_i in tqdm(range(num_events)):
 
@@ -496,14 +496,47 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
         min_true_gamma2_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_true_gamma2_EDep_spacepoints[event_i][:, :3])
         min_other_particles_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_other_particles_EDep_spacepoints[event_i][:, :3])
 
-        # assign features to spacepoints here
+        # Create mutually exclusive categories using priority-based assignment
+        # Priority order: gamma1 > gamma2 > other_particles > cosmic
+        # Each spacepoint is assigned to the category with the smallest distance (if within threshold)
+        
+        num_spacepoints = len(downsampled_Tcluster_spacepoints[event_i])
+        category_assignments = np.full(num_spacepoints, -1, dtype=int)  # -1 = unassigned
+        
+        # Ensure distance arrays are properly shaped
+        min_true_gamma1_dists_flat = min_true_gamma1_dists.flatten() if min_true_gamma1_dists.size > 0 else np.full(num_spacepoints, np.inf)
+        min_true_gamma2_dists_flat = min_true_gamma2_dists.flatten() if min_true_gamma2_dists.size > 0 else np.full(num_spacepoints, np.inf)
+        min_other_particles_dists_flat = min_other_particles_dists.flatten() if min_other_particles_dists.size > 0 else np.full(num_spacepoints, np.inf)
+        
+        # Assign gamma1 (highest priority)
+        gamma1_mask = (min_true_gamma1_dists_flat < close_to_true_particle_spacepoint_threshold)
+        category_assignments[gamma1_mask] = 0  # gamma1
+        
+        # Assign gamma2 (second priority) - only if not already assigned to gamma1
+        gamma2_mask = (min_true_gamma2_dists_flat < close_to_true_particle_spacepoint_threshold)
+        gamma2_mask = gamma2_mask & (category_assignments == -1)  # only unassigned spacepoints
+        category_assignments[gamma2_mask] = 1  # gamma2
+        
+        # Assign other particles (third priority) - only if not already assigned
+        other_mask = (min_other_particles_dists_flat < close_to_true_particle_spacepoint_threshold)
+        other_mask = other_mask & (category_assignments == -1)  # only unassigned spacepoints
+        category_assignments[other_mask] = 2  # other_particles
+        
+        # Assign cosmic (lowest priority) - all remaining spacepoints
+        cosmic_mask = (category_assignments == -1)  # all unassigned spacepoints
+        category_assignments[cosmic_mask] = 3  # cosmic
+        
+        # Extract indices for each category
+        gamma1_indices = np.where(category_assignments == 0)[0]
+        gamma2_indices = np.where(category_assignments == 1)[0]
+        other_particles_indices = np.where(category_assignments == 2)[0]
+        cosmic_indices = np.where(category_assignments == 3)[0]
+        
+        # For the nu/cosmic categorization (keeping original logic for these)
         close_to_truth_indices = np.where(min_truth_dists < close_to_true_nu_spacepoint_threshold)[0]
         far_from_truth_indices = np.where(min_truth_dists >= close_to_true_nu_spacepoint_threshold)[0]
         close_to_reco_nu_indices = np.where(min_reco_nu_dists < close_to_reco_nu_spacepoint_threshold)[0]
         far_from_reco_nu_indices = np.where(min_reco_nu_dists >= close_to_reco_nu_spacepoint_threshold)[0]
-        close_to_true_gamma1_indices = np.where(min_true_gamma1_dists < close_to_true_particcle_spacepoint_threshold)[0]
-        close_to_true_gamma2_indices = np.where(min_true_gamma2_dists < close_to_true_particcle_spacepoint_threshold)[0]
-        close_to_other_particles_indices = np.where(min_other_particles_dists < close_to_true_particcle_spacepoint_threshold)[0]
 
         # categorize spacepoints here
         real_nu_reco_nu_indices = np.intersect1d(close_to_reco_nu_indices, close_to_truth_indices)
@@ -516,10 +549,10 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
         real_cosmic_reco_nu_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][real_cosmic_reco_nu_indices, :])
         real_cosmic_reco_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][real_cosmic_reco_cosmic_indices, :])
 
-        real_gamma1_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][close_to_true_gamma1_indices, :])
-        real_gamma2_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][close_to_true_gamma2_indices, :])
-        real_other_particles_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][close_to_other_particles_indices, :])
-        real_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][far_from_truth_indices, :])
+        real_gamma1_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][gamma1_indices, :])
+        real_gamma2_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][gamma2_indices, :])
+        real_other_particles_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][other_particles_indices, :])
+        real_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][cosmic_indices, :])
 
     return (real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
             real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints)

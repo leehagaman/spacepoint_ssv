@@ -9,7 +9,7 @@ Similar idea to the Second Shower Veto (SSV) used in [Phys. Rev. Lett. 128, 1118
 python3 -m venv venv
 source venv/bin/activate # run this again each time you interact with the code, the rest of the steps here are only needed once
 # run the command corresponding to your machine and pip here: https://pytorch.org, for example `pip install torch torchvision torchaudio` on Mac
-pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplotlib plotly
+pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplotlib plotly scikit-learn
 ```
 
 # To preprocess the spacepoints from a root file:
