@@ -1,4 +1,3 @@
-
 # Spacepoint SSV
 
 A machine-learning based tool to identify a missed second shower from a Pi0 that was misclustered as part of a cosmic ray using Wire-Cell 3D cosmic spacepoints in MicroBooNE. This type of tool should be useful for single photon searches in MicroBooNE and other LArTPCs.
