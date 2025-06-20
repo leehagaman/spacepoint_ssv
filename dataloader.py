@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data import Dataset, DataLoader
 import pickle
 import numpy as np
 import pandas as pd
@@ -33,21 +33,27 @@ class SpacepointDataset(Dataset):
             outputs = pickle.load(f)
         
         self.true_gamma_info_df = outputs[0]
-        # Uncomment these if needed for other particle types
+
+        # Don't need these for now, these contain the original WC guesses 
         # self.real_nu_reco_nu_downsampled_spacepoints = outputs[1]
         # self.real_nu_reco_cosmic_downsampled_spacepoints = outputs[2]
         # self.real_cosmic_reco_nu_downsampled_spacepoints = outputs[3]
         # self.real_cosmic_reco_cosmic_downsampled_spacepoints = outputs[4]
+
+        # These are what we're using for training
         self.real_gamma1_downsampled_spacepoints = outputs[5]
         self.real_gamma2_downsampled_spacepoints = outputs[6]
         self.real_other_particles_downsampled_spacepoints = outputs[7]
         self.real_cosmic_downsampled_spacepoints = outputs[8]
 
-        # filter out events with no spacepoints
+        # Filter out events with no spacepoints
         total_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_gamma1_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_gamma2_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_other_particles_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_cosmic_downsampled_spacepoints]))
+        for num_spacepoints_in_event in total_num_spacepoints_per_event:
+            assert num_spacepoints_in_event == 0 or num_spacepoints_in_event == 500, f"Event with {num_spacepoints_in_event} spacepoints, expected 0 or 500"
+
         event_indices_with_spacepoints = np.where(total_num_spacepoints_per_event > 0)[0]
         self.true_gamma_info_df = self.true_gamma_info_df.iloc[event_indices_with_spacepoints].reset_index(drop=True)
         self.real_gamma1_downsampled_spacepoints = [self.real_gamma1_downsampled_spacepoints[i] for i in event_indices_with_spacepoints]
@@ -75,11 +81,11 @@ class SpacepointDataset(Dataset):
         
         print("Creating spacepoint tensors")
         
-        # Initialize lists to store all spacepoints and their metadata
-        spacepoints = []
-        true_labels = []
-        event_indices = []
-        # Get information to combine all spacepoints in all events into a single pytorch tensor
+        # Create tensors for each event in the format expected by PointNet2: (B, C, N)
+        # where B = batch size (events), C = channels (3 for xyz), N = points per event (500)
+        self.x = []  # List to store spacepoint tensors for each event
+        self.y = []  # List to store label tensors for each event
+        
         for event_idx in range(self.num_events):
             event_spacepoints = []
             event_true_labels = []
@@ -99,116 +105,31 @@ class SpacepointDataset(Dataset):
             
             # Combine all spacepoints for this event
             if event_spacepoints:
-                event_spacepoints = np.vstack(event_spacepoints)
-                spacepoints.append(event_spacepoints)
-                true_labels.extend(event_true_labels)
-                event_indices.extend([event_idx] * len(event_spacepoints))
+                event_spacepoints = np.vstack(event_spacepoints)  # Shape: (500, 3)
+                # Convert to tensor and transpose to (3, 500) format
+                event_tensor = torch.tensor(event_spacepoints, dtype=torch.float32).transpose(0, 1)  # Shape: (3, 500)
+                self.x.append(event_tensor)
+                self.y.append(torch.tensor(event_true_labels, dtype=torch.long))
         
-        # Convert to tensors
-        if spacepoints:
-            self.x = torch.tensor(np.vstack(spacepoints), dtype=torch.float32)
-            self.y = torch.tensor(true_labels, dtype=torch.long)
-            self.event_indices = torch.tensor(event_indices, dtype=torch.long)
-        else:
-            # Handle case with no spacepoints
-            self.x = torch.empty((0, 3), dtype=torch.float32)
-            self.y = torch.empty((0,), dtype=torch.long)
-            self.event_indices = torch.empty((0,), dtype=torch.long)
-        
-        print(f"Created dataset with {len(self.x)} spacepoints from {len(self.true_gamma_info_df)} events")
+        print(f"Created dataset with {len(self.x)} events, each with 500 spacepoints")
         
     def __len__(self):
-        """Return the number of spacepoints in the dataset."""
+        """Return the number of events in the dataset."""
         return len(self.x)
     
     def __getitem__(self, idx):
-        """Get a specific spacepoint from the dataset.
+        """Get a specific event from the dataset.
         
         Returns:
-            tuple: (spacepoint_coordinates, label, event_index)
+            tuple: (spacepoint_coordinates, labels)
+            spacepoint_coordinates: tensor of shape (3, 500) for xyz coordinates
+            labels: tensor of shape (500,) for point labels
         """
-        return self.x[idx], self.y[idx], self.event_indices[idx]
+        return self.x[idx], self.y[idx]
     
     def get_spacepoints_by_event(self, event_idx):
         """Get all spacepoints and labels for a specific event."""
-        mask = self.event_indices == event_idx
-        return self.x[mask], self.y[mask]
-
-
-class EventBasedBatchSampler(Sampler):
-    """
-    Custom batch sampler that ensures each batch contains only complete events.
-    """
-    
-    def __init__(self, dataset, batch_size, shuffle=True):
-        """
-        Initialize the event-based batch sampler.
-        
-        Args:
-            dataset: The dataset containing spacepoints with event indices
-            batch_size: Target batch size (approximate, will be adjusted to ensure complete events)
-            shuffle: Whether to shuffle batches between epochs
-        """
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        
-        # Group spacepoint indices by event
-        self.event_to_indices = {}
-        for idx in range(len(dataset)):
-            _, _, event_idx = dataset[idx]
-            if event_idx.item() not in self.event_to_indices:
-                self.event_to_indices[event_idx.item()] = []
-            self.event_to_indices[event_idx.item()].append(idx)
-        
-        # Create batches that contain complete events
-        self.batches = self._create_batches()
-    
-    def _create_batches(self):
-        """Create batches ensuring each batch contains only complete events."""
-        batches = []
-        current_batch = []
-        current_batch_size = 0
-        
-        event_list = list(self.event_to_indices.keys())
-        
-        # Shuffle events for better batch diversity
-        if self.shuffle:
-            np.random.shuffle(event_list)
-    
-        for event_idx in event_list:
-            event_indices = self.event_to_indices[event_idx]
-            event_size = len(event_indices)
-            
-            # If adding this event would exceed batch size, start a new batch
-            if current_batch_size + event_size > self.batch_size and current_batch:
-                batches.append(current_batch)
-                current_batch = []
-                current_batch_size = 0
-            
-            # Add this event to the current batch
-            current_batch.extend(event_indices)
-            current_batch_size += event_size
-        
-        # Add the last batch if it's not empty
-        if current_batch:
-            batches.append(current_batch)
-        
-        return batches
-    
-    def __iter__(self):
-        """Return an iterator over the batches."""
-        if self.shuffle:
-            # Create a copy of batches and shuffle them
-            shuffled_batches = self.batches.copy()
-            np.random.shuffle(shuffled_batches)
-            return iter(shuffled_batches)
-        else:
-            return iter(self.batches)
-    
-    def __len__(self):
-        """Return the number of batches."""
-        return len(self.batches)
+        return self.x[event_idx], self.y[event_idx]
 
 
 def create_dataloaders(pickle_file,
@@ -224,7 +145,7 @@ def create_dataloaders(pickle_file,
     
     Args:
         pickle_file: Path to the pickle file containing spacepoint data
-        batch_size: Batch size for the dataloaders
+        batch_size: Batch size for the dataloaders (number of events per batch)
         num_events: Number of events to use (None for all events)
         train_fraction: Fraction of data to use for training
         num_workers: Number of worker processes for data loading
@@ -251,24 +172,10 @@ def create_dataloaders(pickle_file,
     train_event_indices = event_perm[:num_training_events]
     test_event_indices = event_perm[num_training_events:]
     
-    # Convert event indices back to spacepoint indices
-    train_spacepoint_indices = []
-    test_spacepoint_indices = []
-    
-    for spacepoint_idx in range(len(full_dataset)):
-        x, y, event_idx = full_dataset[spacepoint_idx]
-        if event_idx in train_event_indices:
-            train_spacepoint_indices.append(spacepoint_idx)
-        else:
-            test_spacepoint_indices.append(spacepoint_idx)
-    
-    train_indices = torch.tensor(train_spacepoint_indices)
-    test_indices = torch.tensor(test_spacepoint_indices)
-    
     # Create train and test datasets using Subset
     from torch.utils.data import Subset
-    train_dataset = Subset(full_dataset, train_indices)
-    test_dataset = Subset(full_dataset, test_indices)
+    train_dataset = Subset(full_dataset, train_event_indices)
+    test_dataset = Subset(full_dataset, test_event_indices)
 
     if not no_save:
         train_rses = full_dataset.true_gamma_info_df.iloc[train_event_indices][["run", "subrun", "event"]].values
@@ -281,25 +188,19 @@ def create_dataloaders(pickle_file,
     # Determine if pin_memory should be used (only beneficial for CUDA)
     pin_memory = torch.cuda.is_available()
     
-    # Create custom batch samplers that ensure complete events
-    train_batch_sampler = EventBasedBatchSampler(train_dataset, batch_size, shuffle=True)
-    test_batch_sampler = EventBasedBatchSampler(test_dataset, batch_size, shuffle=False)
-    
-    # Log batch information
-    train_batch_sizes = [len(batch) for batch in train_batch_sampler.batches]
-    test_batch_sizes = [len(batch) for batch in test_batch_sampler.batches]
-    
-    # Create dataloaders with custom batch samplers
+    # Create dataloaders with batch indexing
     train_dataloader = DataLoader(
         train_dataset,
-        batch_sampler=train_batch_sampler,
+        batch_size=batch_size,
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory
     )
     
     test_dataloader = DataLoader(
         test_dataset,
-        batch_sampler=test_batch_sampler,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory
     )

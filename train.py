@@ -8,11 +8,168 @@ import torch
 import os
 from datetime import datetime
 from dataloader import create_dataloaders
-from model import SpacepointClassifier
+from models.pointnet2_part_seg_ssg import get_model
 
 # TODO: support multi-GPU training
 # torchrun --standalone --nproc_per_node=4 train.py
 # reference: https://github.com/karpathy/nanoGPT/blob/master/train.py
+
+
+def train_step(model, train_dataloader, optimizer, criterion, device, epoch, args):
+
+    model.train()
+    train_loss = 0.0
+    train_correct = 0
+    train_total = 0
+    
+    train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
+    for batch_x, batch_y in train_pbar:
+        # batch_x has shape (B, 3, 500) where B is batch size (number of events)
+        # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
+        
+        # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
+        B, C, N = batch_x.shape
+        batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
+        batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
+        
+        # Create dummy cls_label, the model expects cls_label to be one-hot encoded with 16 classes
+        # originally used for telling the model "chair", "table", etc., but we don't use it
+        cls_label = torch.zeros(B, 16, dtype=torch.float32, device=device)
+        cls_label[:, 0] = 1.0
+        
+        optimizer.zero_grad()
+        
+        # Forward pass
+        outputs, _ = model(batch_x, cls_label)  # Extract point segmentation predictions
+        # The model returns outputs in shape (B, N, num_classes) which needs to be reshaped
+        # Reshape outputs to (B*N, num_classes) for the loss function
+        outputs = outputs.reshape(B*N, -1)
+        loss = criterion(outputs, batch_y_reshaped)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        # Statistics
+        train_loss += loss.item()
+        _, predicted = torch.max(outputs.data, 1)
+        train_total += batch_y_reshaped.size(0)
+        train_correct += (predicted == batch_y_reshaped).sum().item()
+        
+        # Update progress bar
+        train_pbar.set_postfix({
+            'Loss': f'{loss.item():.4f}',
+            'Acc': f'{100 * train_correct / train_total:.2f}%'
+        })
+    
+    avg_train_loss = train_loss / len(train_dataloader)
+    train_accuracy = 100 * train_correct / train_total
+
+    return avg_train_loss, train_accuracy
+
+def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, best_test_loss):
+
+    model.eval()
+    test_loss = 0.0
+    test_correct = 0
+    test_total = 0
+
+    test_num_cosmic_guesses = 0
+    test_num_gamma1_guesses = 0
+    test_num_gamma2_guesses = 0
+    test_num_other_particles_guesses = 0
+
+    num_test_events = 0
+    
+    with torch.no_grad():
+        test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
+        for batch_x, batch_y in test_pbar:
+            # batch_x has shape (B, 3, 500) where B is batch size (number of events)
+            # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+
+            B, C, N = batch_x.shape
+            num_test_events += B
+            
+            # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
+            batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
+            batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
+            
+            # Create dummy cls_label, the model expects cls_label to be one-hot encoded with 16 classes
+            # originally used for telling the model "chair", "table", etc., but we don't use it
+            cls_label = torch.zeros(B, 16, dtype=torch.float32, device=device)
+            cls_label[:, 0] = 1.0
+            
+            # Forward pass
+            outputs, _ = model(batch_x, cls_label)  # Extract point segmentation predictions
+            # The model returns outputs in shape (B, N, num_classes) which needs to be reshaped
+            # Reshape outputs to (B*N, num_classes) for the loss function
+            outputs = outputs.reshape(B*N, -1)
+            loss = criterion(outputs, batch_y_reshaped)
+            
+            # Statistics
+            test_loss += loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            test_total += batch_y_reshaped.size(0)
+            test_correct += (predicted == batch_y_reshaped).sum().item()
+
+            test_num_gamma1_guesses += predicted.eq(0).sum().item()
+            test_num_gamma2_guesses += predicted.eq(1).sum().item()
+            test_num_other_particles_guesses += predicted.eq(2).sum().item()
+            test_num_cosmic_guesses += predicted.eq(3).sum().item()
+            
+            # Update progress bar
+            test_pbar.set_postfix({
+                'Loss': f'{loss.item():.4f}',
+                'Acc': f'{100 * test_correct / test_total:.2f}%'
+            })
+    
+    avg_test_loss = test_loss / len(test_dataloader)
+    test_accuracy = 100 * test_correct / test_total
+    
+    # Learning rate scheduling
+    scheduler.step(avg_test_loss)
+    
+    # Print epoch summary
+    print(f'Epoch {epoch+1}/{args.num_epochs}:')
+    print(f'  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.2f}%')
+    print(f'  Test Loss: {avg_test_loss:.4f}, Test Acc: {test_accuracy:.2f}%')
+    print(f'  Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
+    print(f'  Average num cosmic guesses per event: {test_num_cosmic_guesses / num_test_events:.2f}')
+    print(f'  Average num gamma1 guesses per event: {test_num_gamma1_guesses / num_test_events:.2f}')
+    print(f'  Average num gamma2 guesses per event: {test_num_gamma2_guesses / num_test_events:.2f}')
+    print(f'  Average num other particles guesses per event: {test_num_other_particles_guesses / num_test_events:.2f}')
+    
+    # Save best model
+    if avg_test_loss < best_test_loss and not args.no_save:
+        best_test_loss = avg_test_loss
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': avg_train_loss,
+            'test_loss': avg_test_loss,
+            'train_accuracy': train_accuracy,
+            'test_accuracy': test_accuracy,
+        }, f'{args.outdir}/best_model.pth')
+        print(f'  Saved best model with test loss: {best_test_loss:.4f}')
+    
+    # Save checkpoint every 10 epochs
+    if (epoch + 1) % 10 == 0 and not args.no_save:
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': avg_train_loss,
+            'test_loss': avg_test_loss,
+            'train_accuracy': train_accuracy,
+            'test_accuracy': test_accuracy,
+        }, f'{args.outdir}/checkpoint_epoch_{epoch+1}.pth')
+        print(f'  Saved checkpoint to {args.outdir}/checkpoint_epoch_{epoch+1}.pth')
+
 
 if __name__ == "__main__":
 
@@ -21,10 +178,7 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--outdir', type=str, required=False, help='Path to directory to save logs and checkpoints.', default=f"training_files/{datetime.now().strftime("%Y_%m_%d-%H:%M:%S")}")
     parser.add_argument('-n', '--num_events', type=int, required=False, help='Number of training events to use.')
     parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.5)
-    parser.add_argument('-b', '--batch_size', type=int, required=False, help='''Batch size for training. 
-                        Note that this refers to the target number of spacepoints in a batch, not the number of events.
-                        If this number isn't an exact multiple of the number of spacepoints per event, the batch size will be adjusted to ensure that every batch contains only complete events.
-                        ''', default=2048)
+    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=4)
     parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=20)
     parser.add_argument('-w', '--num_workers', type=int, required=False, help='Number of worker processes for data loading.', default=0)
     parser.add_argument('-ns', '--no_save', action='store_true', required=False, help='Do not save checkpoints.')
@@ -65,7 +219,7 @@ if __name__ == "__main__":
     print(f"Testing batches: {len(test_dataloader)}")
     
     # Get a sample batch to determine input dimensions
-    sample_batch_x, sample_batch_y, sample_batch_event_indices = next(iter(train_dataloader))
+    sample_batch_x, sample_batch_y = next(iter(train_dataloader))
     
     # Create model
     input_dim = 3 # x, y, z
@@ -73,14 +227,10 @@ if __name__ == "__main__":
     
     print(f"Input dimension: {input_dim}")
     print(f"Number of classes: {num_classes}")
+    print(f"Sample batch shape: {sample_batch_x.shape}")
+    print(f"Sample labels shape: {sample_batch_y.shape}")
     
-    model = SpacepointClassifier(
-        input_dim=input_dim,
-        num_classes=num_classes,
-        hidden_dim=128,
-        num_layers=3,
-        dropout=0.1
-    )
+    model = get_model(num_classes=num_classes)
     model = model.to(device)
     
     # Training setup
@@ -93,111 +243,12 @@ if __name__ == "__main__":
     
     # Training loop
     print(f"Starting training for {args.num_epochs} epochs...")
+
+    test_step(model, test_dataloader, criterion, device, -1, args, -1, -1, best_test_loss)
     
     for epoch in range(args.num_epochs):
-        # Training phase
-        model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
-        
-        train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
-        for batch_x, batch_y, batch_event_indices in train_pbar:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
-            batch_event_indices = batch_event_indices.to(device)
-            
-            optimizer.zero_grad()
-            
-            # Forward pass
-            outputs = model(batch_x, batch_event_indices)
-            loss = criterion(outputs, batch_y)
-            
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-            
-            # Statistics
-            train_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            train_total += batch_y.size(0)
-            train_correct += (predicted == batch_y).sum().item()
-            
-            # Update progress bar
-            train_pbar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
-                'Acc': f'{100 * train_correct / train_total:.2f}%'
-            })
-        
-        avg_train_loss = train_loss / len(train_dataloader)
-        train_accuracy = 100 * train_correct / train_total
-        
-        # Validation phase
-        model.eval()
-        test_loss = 0.0
-        test_correct = 0
-        test_total = 0
-        
-        with torch.no_grad():
-            test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
-            for batch_x, batch_y, batch_event_indices in test_pbar:
-                batch_x = batch_x.to(device)
-                batch_y = batch_y.to(device)
-                batch_event_indices = batch_event_indices.to(device)
-                
-                # Forward pass
-                outputs = model(batch_x, batch_event_indices)
-                loss = criterion(outputs, batch_y)
-                
-                # Statistics
-                test_loss += loss.item()
-                _, predicted = torch.max(outputs.data, 1)
-                test_total += batch_y.size(0)
-                test_correct += (predicted == batch_y).sum().item()
-                
-                # Update progress bar
-                test_pbar.set_postfix({
-                    'Loss': f'{loss.item():.4f}',
-                    'Acc': f'{100 * test_correct / test_total:.2f}%'
-                })
-        
-        avg_test_loss = test_loss / len(test_dataloader)
-        test_accuracy = 100 * test_correct / test_total
-        
-        # Learning rate scheduling
-        scheduler.step(avg_test_loss)
-        
-        # Print epoch summary
-        """print(f'Epoch {epoch+1}/{num_epochs}:')
-        print(f'  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.2f}%')
-        print(f'  Test Loss: {avg_test_loss:.4f}, Test Acc: {test_accuracy:.2f}%')
-        print(f'  Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')"""
-        
-        # Save best model
-        if avg_test_loss < best_test_loss and not args.no_save:
-            best_test_loss = avg_test_loss
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'test_loss': avg_test_loss,
-                'train_accuracy': train_accuracy,
-                'test_accuracy': test_accuracy,
-            }, f'{args.outdir}/best_model.pth')
-            print(f'  Saved best model with test loss: {best_test_loss:.4f}')
-        
-        # Save checkpoint every 10 epochs
-        if (epoch + 1) % 10 == 0 and not args.no_save:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'test_loss': avg_test_loss,
-                'train_accuracy': train_accuracy,
-                'test_accuracy': test_accuracy,
-            }, f'{args.outdir}/checkpoint_epoch_{epoch+1}.pth')
+        avg_train_loss, train_accuracy = train_step(model, train_dataloader, optimizer, criterion, device, epoch, args)
+        test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, best_test_loss)
     
     print("Training completed!")
     if not args.no_save:
