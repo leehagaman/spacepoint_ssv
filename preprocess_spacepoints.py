@@ -142,6 +142,7 @@ def get_vtx_and_true_gamma_info(f, num_events):
     true_gamma_info_df["true_num_gamma_pairconvert"] = true_num_gamma_pairconvert
     true_gamma_info_df["true_num_gamma_pairconvert_in_FV"] = true_num_gamma_pairconvert_in_FV
     true_gamma_info_df["true_num_gamma_pairconvert_in_FV_20_MeV"] = true_num_gamma_pairconvert_in_FV_20_MeV
+    true_gamma_info_df["true_num_gamma_one_pairconvert_in_FV_20_MeV"] = true_num_gamma_pairconvert_in_FV_20_MeV == 1
 
     # returning the vertex information separately, since that will be used for downsampling
     return true_nu_vtx, reco_nu_vtx, true_gamma_info_df

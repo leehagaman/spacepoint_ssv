@@ -8,7 +8,7 @@ import torch
 import os
 from datetime import datetime
 from dataloader import create_dataloaders
-from models.pointnet2_part_seg_ssg import get_model
+from models.my_pointnet_model import get_model, get_loss
 
 # TODO: support multi-GPU training
 # torchrun --standalone --nproc_per_node=4 train.py
@@ -20,19 +20,23 @@ def train_step(model, train_dataloader, optimizer, criterion, device, epoch, arg
     model.train()
     train_loss = 0.0
     train_correct = 0
+    train_global_correct = 0
     train_total = 0
+    train_global_total = 0
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
-    for batch_x, batch_y in train_pbar:
+    for batch_x, batch_y, batch_global_y in train_pbar:
         # batch_x has shape (B, 3, 500) where B is batch size (number of events)
         # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
         batch_x = batch_x.to(device)
         batch_y = batch_y.to(device)
+        batch_global_y = batch_global_y.to(device)
         
         # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
         B, C, N = batch_x.shape
         batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
         batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
+        batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
         
         # Create dummy cls_label, the model expects cls_label to be one-hot encoded with 16 classes
         # originally used for telling the model "chair", "table", etc., but we don't use it
@@ -42,11 +46,14 @@ def train_step(model, train_dataloader, optimizer, criterion, device, epoch, arg
         optimizer.zero_grad()
         
         # Forward pass
-        outputs, _ = model(batch_x, cls_label)  # Extract point segmentation predictions
+        outputs, global_outputs = model(batch_x, cls_label)  # Extract point segmentation predictions
         # The model returns outputs in shape (B, N, num_classes) which needs to be reshaped
         # Reshape outputs to (B*N, num_classes) for the loss function
         outputs = outputs.reshape(B*N, -1)
-        loss = criterion(outputs, batch_y_reshaped)
+        
+        # Global outputs are now binary classification logits (B, 1)
+        # Global targets are binary labels (B,)
+        loss, point_loss, global_loss = criterion(outputs, batch_y_reshaped, global_outputs, batch_global_y_reshaped)
         
         # Backward pass
         loss.backward()
@@ -58,23 +65,34 @@ def train_step(model, train_dataloader, optimizer, criterion, device, epoch, arg
         train_total += batch_y_reshaped.size(0)
         train_correct += (predicted == batch_y_reshaped).sum().item()
         
+        # Global accuracy calculation
+        global_predicted = (global_outputs.squeeze(1) > 0).long()  # Convert logits to binary predictions
+        train_global_correct += (global_predicted == batch_global_y_reshaped).sum().item()
+        train_global_total += B
+        
         # Update progress bar
         train_pbar.set_postfix({
             'Loss': f'{loss.item():.4f}',
-            'Acc': f'{100 * train_correct / train_total:.2f}%'
+            'Point_Loss': f'{point_loss.item():.4f}',
+            'Global_Loss': f'{global_loss.item():.4f}',
+            'Point_Acc': f'{100 * train_correct / train_total:.2f}%',
+            'Global_Acc': f'{100 * train_global_correct / train_global_total:.2f}%'
         })
     
     avg_train_loss = train_loss / len(train_dataloader)
     train_accuracy = 100 * train_correct / train_total
+    train_global_accuracy = 100 * train_global_correct / train_global_total
 
-    return avg_train_loss, train_accuracy
+    return avg_train_loss, train_accuracy, train_global_accuracy
 
-def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, best_test_loss):
+def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss):
 
     model.eval()
     test_loss = 0.0
     test_correct = 0
+    test_correct_global = 0
     test_total = 0
+    test_global_total = 0
 
     test_num_cosmic_guesses = 0
     test_num_gamma1_guesses = 0
@@ -85,11 +103,12 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
     
     with torch.no_grad():
         test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
-        for batch_x, batch_y in test_pbar:
+        for batch_x, batch_y, batch_global_y in test_pbar:
             # batch_x has shape (B, 3, 500) where B is batch size (number of events)
             # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
+            batch_global_y = batch_global_y.to(device)
 
             B, C, N = batch_x.shape
             num_test_events += B
@@ -97,6 +116,7 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
             # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
             batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
             batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
+            batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
             
             # Create dummy cls_label, the model expects cls_label to be one-hot encoded with 16 classes
             # originally used for telling the model "chair", "table", etc., but we don't use it
@@ -104,17 +124,23 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
             cls_label[:, 0] = 1.0
             
             # Forward pass
-            outputs, _ = model(batch_x, cls_label)  # Extract point segmentation predictions
+            outputs, global_outputs = model(batch_x, cls_label)  # Extract point segmentation predictions
             # The model returns outputs in shape (B, N, num_classes) which needs to be reshaped
             # Reshape outputs to (B*N, num_classes) for the loss function
             outputs = outputs.reshape(B*N, -1)
-            loss = criterion(outputs, batch_y_reshaped)
+                        
+            loss, point_loss, global_loss = criterion(outputs, batch_y_reshaped, global_outputs, batch_global_y_reshaped)
             
             # Statistics
             test_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
             test_total += batch_y_reshaped.size(0)
             test_correct += (predicted == batch_y_reshaped).sum().item()
+            
+            # Global accuracy calculation
+            global_predicted = (global_outputs.squeeze(1) > 0).long()  # Convert logits to binary predictions
+            test_correct_global += (global_predicted == batch_global_y_reshaped).sum().item()
+            test_global_total += B
 
             test_num_gamma1_guesses += predicted.eq(0).sum().item()
             test_num_gamma2_guesses += predicted.eq(1).sum().item()
@@ -124,7 +150,10 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
             # Update progress bar
             test_pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
-                'Acc': f'{100 * test_correct / test_total:.2f}%'
+                'Point_Loss': f'{point_loss.item():.4f}',
+                'Global_Loss': f'{global_loss.item():.4f}',
+                'Point Acc': f'{100 * test_correct / test_total:.2f}%',
+                'Global Acc': f'{100 * test_correct_global / test_global_total:.2f}%'
             })
     
     avg_test_loss = test_loss / len(test_dataloader)
@@ -135,8 +164,8 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
     
     # Print epoch summary
     print(f'Epoch {epoch+1}/{args.num_epochs}:')
-    print(f'  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.2f}%')
-    print(f'  Test Loss: {avg_test_loss:.4f}, Test Acc: {test_accuracy:.2f}%')
+    print(f'  Train Loss: {avg_train_loss:.4f}, Train Point Acc: {train_accuracy:.2f}%, Train Global Acc: {train_global_accuracy:.2f}%')
+    print(f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test Global Acc: {100 * test_correct_global / test_global_total:.2f}%')
     print(f'  Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
     print(f'  Average num cosmic guesses per event: {test_num_cosmic_guesses / num_test_events:.2f}')
     print(f'  Average num gamma1 guesses per event: {test_num_gamma1_guesses / num_test_events:.2f}')
@@ -219,22 +248,15 @@ if __name__ == "__main__":
     print(f"Testing batches: {len(test_dataloader)}")
     
     # Get a sample batch to determine input dimensions
-    sample_batch_x, sample_batch_y = next(iter(train_dataloader))
+    sample_batch_x, sample_batch_y, sample_batch_global_y = next(iter(train_dataloader))
     
-    # Create model
-    input_dim = 3 # x, y, z
-    num_classes = 4 # gamma1, gamma2, other, cosmic
-    
-    print(f"Input dimension: {input_dim}")
-    print(f"Number of classes: {num_classes}")
-    print(f"Sample batch shape: {sample_batch_x.shape}")
-    print(f"Sample labels shape: {sample_batch_y.shape}")
-    
-    model = get_model(num_classes=num_classes)
+    model = get_model()
     model = model.to(device)
+
+    print(f"created model with {sum(p.numel() for p in model.parameters())} parameters")
     
     # Training setup
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = get_loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
@@ -244,11 +266,11 @@ if __name__ == "__main__":
     # Training loop
     print(f"Starting training for {args.num_epochs} epochs...")
 
-    test_step(model, test_dataloader, criterion, device, -1, args, -1, -1, best_test_loss)
+    test_step(model, test_dataloader, criterion, device, -1, args, -1, -1, -1, best_test_loss)
     
     for epoch in range(args.num_epochs):
-        avg_train_loss, train_accuracy = train_step(model, train_dataloader, optimizer, criterion, device, epoch, args)
-        test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, best_test_loss)
+        avg_train_loss, train_accuracy, train_global_accuracy = train_step(model, train_dataloader, optimizer, criterion, device, epoch, args)
+        test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss)
     
     print("Training completed!")
     if not args.no_save:
