@@ -2,22 +2,25 @@ import numpy as np
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.neighbors import NearestNeighbors, KernelDensity
 
-
-def fps_sampling(points, n_samples):
+def fps_sampling(points, n_samples, rng=None):
     """
     Perform an optimized Farthest Point Sampling (FPS) using NumPy.
 
     :param points: numpy array of shape (N, 3) representing the point cloud
     :param n_samples: number of points to sample
+    :param rng: random number generator instance
     :return: indices of sampled points
     """
+    if rng is None:
+        rng = np.random.default_rng()
+        
     N = points.shape[0]
     if N == 0: return np.empty((0, 3))
     sampled_indices = np.zeros(n_samples, dtype=int)
     distances = np.full(N, np.inf)
 
     # Choose the first point randomly
-    sampled_indices[0] = np.random.randint(N)
+    sampled_indices[0] = rng.integers(N)
     
     # Efficiently compute distances using vectorized operations
     for i in range(1, n_samples):
@@ -33,14 +36,17 @@ def fps_sampling(points, n_samples):
     
     return sampled_points
 
-def fps_clustering_downsample(points, n_samples, debug=False):
+def fps_clustering_downsample(points, n_samples, rng=None, debug=False):
     """
     Downsample the point cloud using FPS and clustering.
     
     :param points: numpy array of shape (N, 3) representing the point cloud
     :param n_samples: number of points in the downsampled cloud
+    :param rng: random number generator instance
     :return: downsampled point cloud
     """
+    if rng is None:
+        rng = np.random.default_rng()
 
     if len(points) == 0 or n_samples == 0: return np.empty((0, 3))
 
@@ -51,7 +57,7 @@ def fps_clustering_downsample(points, n_samples, debug=False):
         print(f"performing FPS...", end="", flush=True)
 
     # Perform FPS to get initial samples
-    sampled_points = fps_sampling(points, n_samples)
+    sampled_points = fps_sampling(points, n_samples, rng)
     
     if debug:
         print(f"done", flush=True)
@@ -119,7 +125,10 @@ def remove_outliers(points, min_neighbors=5, radius=None, k=10):
 
 
 
-def energy_weighted_density_sampling(points, energies, n_samples=1000):
+def energy_weighted_density_sampling(points, energies, n_samples=1000, rng=None):
+
+    if rng is None:
+        rng = np.random.default_rng()
 
     if len(points) == 0 or n_samples == 0: return np.empty((0, 3))
 
@@ -131,7 +140,7 @@ def energy_weighted_density_sampling(points, energies, n_samples=1000):
     probs = energies / energies.sum()
     
     # Sample based on energy values
-    sampled_indices = np.random.choice(len(points), n_samples, replace=False, p=probs)
+    sampled_indices = rng.choice(len(points), n_samples, replace=False, p=probs)
     
     sampled_points = points[sampled_indices]
     
