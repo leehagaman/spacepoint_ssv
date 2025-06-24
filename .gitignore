@@ -3,9 +3,11 @@
 *.json
 *.zip
 *.pkl
+*.root
 *.xml
-__pycache__/*
+*.pth
+__pycache__/
 *.pyc
 venv/
 
-models/PointTransformerV3_model.py
+models/PointTransformerV3

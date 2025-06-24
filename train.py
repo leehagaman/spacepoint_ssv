@@ -1,3 +1,7 @@
+import warnings
+# Ignore FutureWarning from timm.models.layers - must be before any timm imports
+warnings.filterwarnings("ignore", category=FutureWarning, module="timm.models.layers")
+
 from tqdm import tqdm
 import pickle
 import argparse
@@ -8,9 +12,9 @@ import torch
 import os
 from datetime import datetime
 from dataloader import create_dataloaders
-from models.my_PointTransformer_model import MultiTaskPointTransformerV3, get_loss
+from models.my_PointTransformer_model import MultiTaskPointTransformerV3
 
-def train_step(model, train_dataloader, optimizer, criterion, device, epoch, args):
+def train_step(model, train_dataloader, optimizer, device, epoch, args):
 
     model.train()
     train_loss = 0.0
@@ -33,54 +37,74 @@ def train_step(model, train_dataloader, optimizer, criterion, device, epoch, arg
         batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
         batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
         
-        # Create dummy cls_label, the model expects cls_label to be one-hot encoded with 16 classes
-        # originally used for telling the model "chair", "table", etc., but we don't use it
-        cls_label = torch.zeros(B, 16, dtype=torch.float32, device=device)
-        cls_label[:, 0] = 1.0
-        
         optimizer.zero_grad()
         
+        # Prepare data for MultiTaskPointTransformerV3
+        coord = batch_x_reshaped  # [B*N, 3]
+        batch_idx = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
+        
+        data_dict = {
+            'coord': coord,
+            'feat': coord,  # Use coordinates as initial features
+            'grid_size': torch.tensor(0.1, device=device),  # Increased from 0.01 to 0.1
+            'batch': batch_idx
+        }
+        
         # Forward pass
-        outputs, global_outputs = model(batch_x, cls_label)  # Extract point segmentation predictions
-        # The model returns outputs in shape (B, N, num_classes) which needs to be reshaped
-        # Reshape outputs to (B*N, num_classes) for the loss function
-        outputs = outputs.reshape(B*N, -1)
+        predictions = model(data_dict)
         
-        # Global outputs are now binary classification logits (B, 1)
-        # Global targets are binary labels (B,)
-        loss, point_loss, global_loss = criterion(outputs, batch_y_reshaped, global_outputs, batch_global_y_reshaped)
+        # Prepare targets for loss computation
+        targets = {
+            'point_labels': batch_y_reshaped,
+            'event_labels': batch_global_y_reshaped
+        }
         
-        # Backward pass
-        loss.backward()
-        optimizer.step()
+        # Compute loss using model's compute_loss method
+        losses = model.compute_loss(predictions, targets)
+        total_loss = losses['total_loss']
+        
+        # Extract individual losses for logging
+        point_loss = losses.get('point_loss', torch.tensor(0.0, device=device))
+        event_loss = losses.get('event_loss', torch.tensor(0.0, device=device))
         
         # Statistics
-        train_loss += loss.item()
-        _, predicted = torch.max(outputs.data, 1)
+        train_loss += total_loss.item()
+        
+        # Backward pass
+        total_loss.backward()
+        optimizer.step()
+        
+        # Statistics for point-wise predictions
+        point_features = predictions['point_features']
+        point_logits = point_features.feat  # [B*N, num_classes]
+        _, predicted = torch.max(point_logits.data, 1)
         train_total += batch_y_reshaped.size(0)
         train_correct += (predicted == batch_y_reshaped).sum().item()
         
-        # Global accuracy calculation
-        global_predicted = (global_outputs.squeeze(1) > 0).long()  # Convert logits to binary predictions
-        train_global_correct += (global_predicted == batch_global_y_reshaped).sum().item()
-        train_global_total += B
+        # Statistics for global predictions
+        if 'event_logits' in predictions:
+            event_logits = predictions['event_logits']  # [B, num_event_classes]
+            global_predicted = torch.argmax(event_logits, dim=1)  # [B]
+            train_global_correct += (global_predicted == batch_global_y_reshaped).sum().item()
+            train_global_total += B
         
         # Update progress bar
         train_pbar.set_postfix({
-            'Loss': f'{loss.item():.4f}',
+            'Loss': f'{total_loss.item():.4f}',
             'Point_Loss': f'{point_loss.item():.4f}',
-            'Global_Loss': f'{global_loss.item():.4f}',
+            'Event_Loss': f'{event_loss.item():.4f}',
             'Point_Acc': f'{100 * train_correct / train_total:.2f}%',
-            'Global_Acc': f'{100 * train_global_correct / train_global_total:.2f}%'
+            'Global_Acc': f'{100 * train_global_correct / train_global_total:.2f}%' if train_global_total > 0 else 'N/A'
         })
     
     avg_train_loss = train_loss / len(train_dataloader)
     train_accuracy = 100 * train_correct / train_total
-    train_global_accuracy = 100 * train_global_correct / train_global_total
+    train_global_accuracy = 100 * train_global_correct / train_global_total if train_global_total > 0 else 0
 
     return avg_train_loss, train_accuracy, train_global_accuracy
 
-def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss):
+
+def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss):
 
     model.eval()
     test_loss = 0.0
@@ -113,29 +137,50 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
             batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
             batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
             
-            # Create dummy cls_label, the model expects cls_label to be one-hot encoded with 16 classes
-            # originally used for telling the model "chair", "table", etc., but we don't use it
-            cls_label = torch.zeros(B, 16, dtype=torch.float32, device=device)
-            cls_label[:, 0] = 1.0
+            # Prepare data for MultiTaskPointTransformerV3
+            coord = batch_x_reshaped  # [B*N, 3]
+            batch_idx = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
+            
+            data_dict = {
+                'coord': coord,
+                'feat': coord,  # Use coordinates as initial features
+                'grid_size': torch.tensor(0.1, device=device),  # Increased from 0.01 to 0.1
+                'batch': batch_idx
+            }
             
             # Forward pass
-            outputs, global_outputs = model(batch_x, cls_label)  # Extract point segmentation predictions
-            # The model returns outputs in shape (B, N, num_classes) which needs to be reshaped
-            # Reshape outputs to (B*N, num_classes) for the loss function
-            outputs = outputs.reshape(B*N, -1)
-                        
-            loss, point_loss, global_loss = criterion(outputs, batch_y_reshaped, global_outputs, batch_global_y_reshaped)
+            predictions = model(data_dict)
+            
+            # Prepare targets for loss computation
+            targets = {
+                'point_labels': batch_y_reshaped,
+                'event_labels': batch_global_y_reshaped
+            }
+            
+            # Compute loss using model's compute_loss method
+            losses = model.compute_loss(predictions, targets)
+            total_loss = losses['total_loss']
+            
+            # Extract individual losses for logging
+            point_loss = losses.get('point_loss', torch.tensor(0.0, device=device))
+            event_loss = losses.get('event_loss', torch.tensor(0.0, device=device))
             
             # Statistics
-            test_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
+            test_loss += total_loss.item()
+            
+            # Statistics for point-wise predictions
+            point_features = predictions['point_features']
+            point_logits = point_features.feat  # [B*N, num_classes]
+            _, predicted = torch.max(point_logits.data, 1)
             test_total += batch_y_reshaped.size(0)
             test_correct += (predicted == batch_y_reshaped).sum().item()
             
-            # Global accuracy calculation
-            global_predicted = (global_outputs.squeeze(1) > 0).long()  # Convert logits to binary predictions
-            test_correct_global += (global_predicted == batch_global_y_reshaped).sum().item()
-            test_global_total += B
+            # Statistics for global predictions
+            if 'event_logits' in predictions:
+                event_logits = predictions['event_logits']  # [B, num_event_classes]
+                global_predicted = torch.argmax(event_logits, dim=1)  # [B]
+                test_correct_global += (global_predicted == batch_global_y_reshaped).sum().item()
+                test_global_total += B
 
             test_num_gamma1_guesses += predicted.eq(0).sum().item()
             test_num_gamma2_guesses += predicted.eq(1).sum().item()
@@ -144,11 +189,11 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
             
             # Update progress bar
             test_pbar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
+                'Loss': f'{total_loss.item():.4f}',
                 'Point_Loss': f'{point_loss.item():.4f}',
-                'Global_Loss': f'{global_loss.item():.4f}',
+                'Event_Loss': f'{event_loss.item():.4f}',
                 'Point Acc': f'{100 * test_correct / test_total:.2f}%',
-                'Global Acc': f'{100 * test_correct_global / test_global_total:.2f}%'
+                'Global Acc': f'{100 * test_correct_global / test_global_total:.2f}%' if test_global_total > 0 else 'N/A'
             })
     
     avg_test_loss = test_loss / len(test_dataloader)
@@ -160,7 +205,7 @@ def test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_
     # Print epoch summary
     print(f'Epoch {epoch+1}/{args.num_epochs}:')
     print(f'  Train Loss: {avg_train_loss:.4f}, Train Point Acc: {train_accuracy:.2f}%, Train Global Acc: {train_global_accuracy:.2f}%')
-    print(f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test Global Acc: {100 * test_correct_global / test_global_total:.2f}%')
+    print(f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test Global Acc: {100 * test_correct_global / test_global_total:.2f}%' if test_global_total > 0 else f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test Global Acc: N/A')
     print(f'  Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
     print(f'  Average num cosmic guesses per event: {test_num_cosmic_guesses / num_test_events:.2f}')
     print(f'  Average num gamma1 guesses per event: {test_num_gamma1_guesses / num_test_events:.2f}')
@@ -245,13 +290,22 @@ if __name__ == "__main__":
     # Get a sample batch to determine input dimensions
     sample_batch_x, sample_batch_y, sample_batch_global_y = next(iter(train_dataloader))
     
-    model = MultiTaskPointTransformerV3()
+    # Determine number of classes from the data
+    num_point_classes = 4
+    num_event_classes = 2
+    
+    model = MultiTaskPointTransformerV3(
+        num_classes=4,          # true gamma 1, true gamma 2, other particles, cosmic
+        num_event_classes=2,    # signal 1g, background 2g
+        event_loss_weight=1.0,
+        in_channels=3,          # 3 coordinates (x, y, z)
+        enable_event_classification=True,  # Disable for now
+    )
     model = model.to(device)
 
     print(f"created model with {sum(p.numel() for p in model.parameters())} parameters")
     
     # Training setup
-    criterion = get_loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
@@ -261,11 +315,12 @@ if __name__ == "__main__":
     # Training loop
     print(f"Starting training for {args.num_epochs} epochs...")
 
-    test_step(model, test_dataloader, criterion, device, -1, args, -1, -1, -1, best_test_loss)
+    print("First, a test step with random initialization")
+    test_step(model, test_dataloader, device, -1, args, -1, -1, -1, best_test_loss)
     
     for epoch in range(args.num_epochs):
-        avg_train_loss, train_accuracy, train_global_accuracy = train_step(model, train_dataloader, optimizer, criterion, device, epoch, args)
-        test_step(model, test_dataloader, criterion, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss)
+        avg_train_loss, train_accuracy, train_global_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args)
+        test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss)
     
     print("Training completed!")
     if not args.no_save:

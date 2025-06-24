@@ -1,8 +1,7 @@
-
 import torch
 import torch.nn as nn
 from typing import List, Dict, Any
-from models.PointTransformerV3_model import PointTransformerV3, Point
+from models.PointTransformerV3.model import PointTransformerV3, Point
 
 class EventCategorizationHead(nn.Module):
     """
@@ -47,6 +46,11 @@ class EventCategorizationHead(nn.Module):
         batch_features = []
         offsets = point_features.offset
         
+        # Handle case where offsets don't start from 0
+        if len(offsets) > 0 and offsets[0] != 0:
+            # Add 0 at the beginning if it's missing
+            offsets = torch.cat([torch.tensor([0], device=offsets.device, dtype=offsets.dtype), offsets])
+        
         for i in range(len(offsets) - 1):
             start_idx = offsets[i]
             end_idx = offsets[i + 1]
@@ -68,7 +72,7 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
     def __init__(
         self,
         # Event categorization parameters
-        num_event_classes: int = 4,
+        num_event_classes: int = 10,
         event_hidden_channels: List[int] = [512, 256],
         event_dropout: float = 0.5,
         enable_event_classification: bool = True,
@@ -76,6 +80,9 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         # All original PTv3 parameters
         **kwargs
     ):
+        # Extract num_classes for point-wise classification (not passed to parent)
+        self.num_point_classes = kwargs.pop('num_classes', 4)  # Default to 4 classes
+        
         # Initialize the base PointTransformerV3 with all original parameters
         super().__init__(**kwargs)
         
@@ -84,11 +91,14 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         self.event_loss_weight = event_loss_weight
         self.num_event_classes = num_event_classes
         
+        # Add point-wise classification head
+        # The default PointTransformerV3 decoder output is 64 channels (first element of dec_channels)
+        final_dec_channels = kwargs.get('dec_channels', (64, 64, 128, 256))[0]  # Use first element (64)
+        self.point_classifier = nn.Linear(final_dec_channels, self.num_point_classes)
+        
         # Add event categorization head if enabled
         if self.enable_event_classification:
-            # Use the encoder's final channel count for event classification
             final_enc_channels = kwargs.get('enc_channels', (32, 64, 128, 256, 512))[-1]
-            
             self.event_head = EventCategorizationHead(
                 in_channels=final_enc_channels,
                 num_event_classes=num_event_classes,
@@ -107,27 +117,28 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
             
         Returns:
             Dictionary containing:
-            - 'point_features': Point-wise features/predictions from original model
+            - 'point_features': Point object with features and point-wise predictions
             - 'event_logits': Event classification logits (if enabled)
         """
-        # Get point-wise features from the base model
+        # Use the parent's forward method to get the final point features
         point_features = super().forward(data_dict)
+        
+        # Apply point-wise classification
+        point_logits = self.point_classifier(point_features.feat)
+        point_features.feat = point_logits  # Replace features with logits
         
         results = {'point_features': point_features}
         
         # Add event classification if enabled
         if self.enable_event_classification:
-            # Use encoder output for event classification (before decoder)
-            # We need to run the encoder part separately to get intermediate features
+            # Get encoder output by running the encoder part separately
             point = Point(data_dict)
             point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
             point.sparsify()
-            
             point = self.embedding(point)
-            encoded_point = self.enc(point)
+            encoder_output = self.enc(point)
             
-            # Get event classification from encoded features
-            event_logits = self.event_head(encoded_point)
+            event_logits = self.event_head(encoder_output)
             results['event_logits'] = event_logits
         
         return results
@@ -145,13 +156,10 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         """
         losses = {}
         
-        # Point-wise loss (implement based on your specific task)
+        # Point-wise loss
         if 'point_labels' in targets:
-            # Example: cross-entropy loss for point classification
-            point_loss = nn.CrossEntropyLoss()(
-                predictions['point_features'].feat,  # Assuming .feat contains logits
-                targets['point_labels']
-            )
+            point_logits = predictions['point_features'].feat  # [B*N, num_classes]
+            point_loss = nn.CrossEntropyLoss()(point_logits, targets['point_labels'])
             losses['point_loss'] = point_loss
         
         # Event-level loss

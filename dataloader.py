@@ -63,7 +63,7 @@ class SpacepointDataset(Dataset):
 
         if self.num_events is None:
             self.num_events = self.true_gamma_info_df.shape[0]
-        print(f"Loading {self.num_events} events")
+        print(f"Restricting to first {self.num_events} events")
         self.true_gamma_info_df = self.true_gamma_info_df.iloc[:self.num_events]
         self.real_gamma1_downsampled_spacepoints = self.real_gamma1_downsampled_spacepoints[:self.num_events]
         self.real_gamma2_downsampled_spacepoints = self.real_gamma2_downsampled_spacepoints[:self.num_events]
@@ -113,7 +113,7 @@ class SpacepointDataset(Dataset):
                 self.x.append(event_tensor)
                 self.y.append(torch.tensor(event_true_labels, dtype=torch.long))
         
-        print(f"Created dataset with {len(self.x)} events, each with 500 spacepoints")
+        print(f"Created dataset with {len(self.x)} events")
         
     def __len__(self):
         """Return the number of events in the dataset."""
