@@ -11,3 +11,6 @@ __pycache__/
 venv/
 
 models/PointTransformerV3
+
+training_files/
+!training_files/.gitkeep

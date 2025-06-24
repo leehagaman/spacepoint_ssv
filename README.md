@@ -21,9 +21,9 @@ cd ../..
 ```
 python3 -m venv venv
 source venv/bin/activate # run this again each time you interact with the code, the rest of the steps here are only needed once
-# run the command corresponding to your machine and pip here: https://pytorch.org, for example `pip install torch torchvision torchaudio`
 
-# check that these match your CUDA version, this causes the project to only work on Nvidia
+# check that these match your machine and OS and CUDA version, this causes the project to only work on Nvidia
+pip install torch torchvision torchaudio # or other command from https://pytorch.org
 pip install spconv-cu126
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu126.html
 pip install flash-attn --no-build-isolation
@@ -33,7 +33,7 @@ pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplot
 
 # To preprocess the spacepoints from a root file:
 ```
-python preprocess_spacepoints.py -f input_files/bdt_convert_superunified_bnb_ncpi0_full_spacepoints.root -n 100
+python preprocess_spacepoints.py -f input_files/bdt_convert_superunified_bnb_ncpi0_full_spacepoints.root -n 200 -fd 0.5
 ```
 
 # To run the training:

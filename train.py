@@ -40,7 +40,7 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         optimizer.zero_grad()
         
         # Prepare data for MultiTaskPointTransformerV3
-        coord = batch_x_reshaped  # [B*N, 3]
+        coord = batch_x_reshaped.contiguous()  # [B*N, 3] - make contiguous
         batch_idx = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
         
         data_dict = {
@@ -138,7 +138,7 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
             
             # Prepare data for MultiTaskPointTransformerV3
-            coord = batch_x_reshaped  # [B*N, 3]
+            coord = batch_x_reshaped.contiguous()  # [B*N, 3] - make contiguous
             batch_idx = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
             
             data_dict = {

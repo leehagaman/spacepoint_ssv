@@ -52,6 +52,9 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices):
         else:
             delete_gamma_here = event_i in deleted_gamma_indices
 
+        if not delete_gamma_here:
+            deleted_gamma_pf_indices.append(None)
+
         num_particles = len(wc_geant_dic["truth_id"][event_i])
                 
         curr_true_num_gamma = 0
