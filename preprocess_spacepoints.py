@@ -8,29 +8,9 @@ import pandas as pd
 
 from helpers.spacepoint_sampling import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling
 
-def delete_one_gamma(wc_geant_dic, deleted_gamma_2_indices):
-    truth_id = wc_geant_dic["truth_id"]
-    truth_mother = wc_geant_dic["truth_mother"]
-    truth_pdg = wc_geant_dic["truth_pdg"]
-    truth_startMomentum = wc_geant_dic["truth_startMomentum"]
-    truth_startXYZT = wc_geant_dic["truth_startXYZT"]
-    truth_endXYZT = wc_geant_dic["truth_endXYZT"]
-
-    new_geant_dic = {
-        "truth_id": truth_id,
-        "truth_mother": truth_mother,
-        "truth_pdg": truth_pdg,
-        "truth_startMomentum": truth_startMomentum,
-        "truth_startXYZT": truth_startXYZT,
-        "truth_endXYZT": truth_endXYZT
-    }
-    return new_geant_dic
-
-def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_2_indices):
+def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices):
 
     # loads non-spacepoint information from the root file, including RSE, true nu vtx, reco nu vtx, and true gamma info
-
-    print("getting true gamma information")
 
     rse = f["wcpselection"]["T_eval"].arrays(["run", "subrun", "event"], library="np", entry_start=0, entry_stop=num_events)
     true_nu_vtx = f["wcpselection"]["T_eval"].arrays(["truth_vtxX", "truth_vtxY", "truth_vtxZ"], library="np", entry_start=0, entry_stop=num_events)
@@ -63,11 +43,14 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_2_indices):
 
     wc_geant_dic = f["wcpselection"]["T_PFeval"].arrays(["truth_id", "truth_mother", "truth_pdg", "truth_startMomentum", "truth_startXYZT", "truth_endXYZT"], library="np")
 
-    deleted_gamma_2_pf_indices = []
+    deleted_gamma_pf_indices = []
 
     for event_i in tqdm(range(num_events)):
 
-        delete_gamma_here = event_i in deleted_gamma_2_indices
+        if deleted_gamma_indices is None:
+            delete_gamma_here = False
+        else:
+            delete_gamma_here = event_i in deleted_gamma_indices
 
         num_particles = len(wc_geant_dic["truth_id"][event_i])
                 
@@ -91,7 +74,7 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_2_indices):
                 if wc_geant_dic["truth_pdg"][event_i][i] == 22: # this is a photon from a pi0 or a primary photon (most likely from an eta or Delta radiative)
 
                     if delete_gamma_here:
-                        deleted_gamma_2_pf_indices.append(i) # note that we deleted this photon
+                        deleted_gamma_pf_indices.append(i) # note that we deleted this photon
                         delete_gamma_here = False # don't delete another photon in this event
                         continue
 
@@ -171,18 +154,16 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_2_indices):
     true_gamma_info_df["true_num_gamma_pairconvert_in_FV_20_MeV"] = true_num_gamma_pairconvert_in_FV_20_MeV
     true_gamma_info_df["true_num_gamma_one_pairconvert_in_FV_20_MeV"] = true_num_gamma_pairconvert_in_FV_20_MeV == 1
 
-    manually_deleted_gamma_2 = np.zeros(num_events)
-    if deleted_gamma_2_indices is not None:
-        manually_deleted_gamma_2[deleted_gamma_2_indices] = 1
-    true_gamma_info_df["manually_deleted_gamma_2"] = manually_deleted_gamma_2
+    manually_deleted_gamma = np.zeros(num_events)
+    if deleted_gamma_indices is not None:
+        manually_deleted_gamma[deleted_gamma_indices] = 1
+    true_gamma_info_df["manually_deleted_gamma"] = manually_deleted_gamma
 
     # returning the vertex information separately, since that will be used for downsampling
-    return true_nu_vtx, reco_nu_vtx, true_gamma_info_df, deleted_gamma_2_pf_indices
+    return true_nu_vtx, reco_nu_vtx, true_gamma_info_df, deleted_gamma_pf_indices
 
 
-def get_geant_points(f, num_interpolated_points=5, num_events=None, deleted_gamma_2_indices = None, deleted_gamma_2_pf_indices = None):
-
-    print("getting Geant4 points from Wire-Cell PF tree")
+def get_geant_points(f, num_events=None, num_interpolated_points=5, deleted_gamma_indices=None, deleted_gamma_pf_indices=None):
 
     deleted_photon_types = [] # no deleted photon by default, but this variable will be set to 1 or 2 if gamma1 or gamma2 was manually deleted
 
@@ -213,9 +194,13 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None, deleted_gamm
             true_gamma_1_geant_points.append(np.array([]))
             true_gamma_2_geant_points.append(np.array([]))
             other_particles_geant_points.append(np.array([]))
+            deleted_photon_types.append(0)
             continue
 
-        delete_gamma_here = event_i in deleted_gamma_2_indices
+        if deleted_gamma_indices is None:
+            delete_gamma_here = False
+        else:
+            delete_gamma_here = event_i in deleted_gamma_indices
 
         # finding the daughters of the primary pi0
         daughters_of_primary_pi0_ids = []
@@ -227,7 +212,7 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None, deleted_gamm
                 daughters_of_primary_pi0_ids.append(wc_geant_dic["truth_id"][event_i][i])
                 daughters_of_primary_pi0_pdgs.append(wc_geant_dic["truth_pdg"][event_i][i])
 
-                if delete_gamma_here and deleted_gamma_2_pf_indices[event_i] == i: # this is the manually deleted photon
+                if delete_gamma_here and deleted_gamma_pf_indices[event_i] == i: # this is the manually deleted photon
                     curr_deleted_photon_type = len(daughters_of_primary_pi0_pdgs) # sets this as either 1 or 2, for gamma1 or gamma2
 
         if not (len(daughters_of_primary_pi0_pdgs) == 2 and daughters_of_primary_pi0_pdgs[0] == 22 and daughters_of_primary_pi0_pdgs[1] == 22):
@@ -235,6 +220,7 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None, deleted_gamm
             true_gamma_1_geant_points.append(np.array([]))
             true_gamma_2_geant_points.append(np.array([]))
             other_particles_geant_points.append(np.array([]))
+            deleted_photon_types.append(0)
             continue
 
         # finding all descendants of the first daughter of the primary pi0
@@ -369,7 +355,6 @@ def get_geant_points(f, num_interpolated_points=5, num_events=None, deleted_gamm
         
 def load_all_spacepoints(f, num_events):
 
-    print("loading spacepoints from root file")
     # re-formatting the spacepoints before downsampling
 
     spacepoints = f["wcpselection"]["T_spacepoints"].arrays(["Tcluster_spacepoints_x", 
@@ -427,8 +412,6 @@ def load_all_spacepoints(f, num_events):
 
 def categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, num_events):
     # we don't delete a photon here, we do that as part of the downsampling step later
-    
-    print("categorizing true energy deposition points")
 
     # Split TrueEDep_spacepoints into gamma1, gamma2 and other particles
     true_gamma1_EDep_spacepoints = []
@@ -468,48 +451,64 @@ def categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_
             true_gamma2_EDep_spacepoints, true_gamma2_EDep_spacepoints_edep, 
             other_particles_EDep_spacepoints, other_particles_EDep_spacepoints_edep)
 
-def downsample_spacepoints(Tcluster_spacepoints, Trec_spacepoints, 
-                           TrueEDep_spacepoints, TrueEDep_spacepoints_edep, 
-                           true_gamma1_EDep_spacepoints, true_gamma1_EDep_spacepoints_edep, 
-                           true_gamma2_EDep_spacepoints, true_gamma2_EDep_spacepoints_edep, 
-                           other_particles_EDep_spacepoints, other_particles_EDep_spacepoints_edep, 
-                           num_events, reco_nu_vtx, rng=None,
-                           close_to_reco_nu_vtx_threshold=200,
-                           recalculate_downsampling=True, deleted_photon_types=None):
 
-    print("downsampling spacepoints")
+def delete_one_gamma_from_spacepoints(spacepoints, downsampled_deleted_gamma_EDep_spacepoints, distance_threshold=5, num_events=None):
 
-    downsampled_Tcluster_spacepoints = {}
-    downsampled_Trec_spacepoints = {}
-    downsampled_TrueEDep_spacepoints = {}
-    downsampled_true_gamma1_EDep_spacepoints = {}
-    downsampled_true_gamma2_EDep_spacepoints = {}
-    downsampled_other_particles_EDep_spacepoints = {}
+    spacepoints_with_deleted_gamma = []
+
+    if num_events is None:
+        num_events = len(spacepoints)
+
     for event_i in tqdm(range(num_events)):
 
-        nearby_reco_nu_vtx_indices = np.where(np.sqrt((Tcluster_spacepoints[event_i][:, 0] - reco_nu_vtx[event_i][0])**2
-                                                    + (Tcluster_spacepoints[event_i][:, 1] - reco_nu_vtx[event_i][1])**2
-                                                    + (Tcluster_spacepoints[event_i][:, 2] - reco_nu_vtx[event_i][2])**2) < close_to_reco_nu_vtx_threshold)[0]
-        Tcluster_spacepoints_near_reco_nu_vtx = Tcluster_spacepoints[event_i][nearby_reco_nu_vtx_indices, :]
-        downsampled_Tcluster_spacepoints[event_i] = fps_clustering_downsample(Tcluster_spacepoints_near_reco_nu_vtx, 500, rng)
+        if len(downsampled_deleted_gamma_EDep_spacepoints[event_i]) == 0: # no true photon spacepoints to delete, keeping everything as it was
+            spacepoints_with_deleted_gamma.append(spacepoints[event_i])
+            continue
 
-        downsampled_Trec_spacepoints[event_i] = fps_clustering_downsample(Trec_spacepoints[event_i], 200, rng)
+        if len(spacepoints[event_i]) == 0: # no Tcluster spacepoints, so nothing to delete
+            spacepoints_with_deleted_gamma.append(spacepoints[event_i])
+            continue
 
-        downsampled_TrueEDep_spacepoints[event_i] = energy_weighted_density_sampling(TrueEDep_spacepoints[event_i], TrueEDep_spacepoints_edep[event_i], 500, rng)
+        min_dists = get_min_dists(spacepoints[event_i], downsampled_deleted_gamma_EDep_spacepoints[event_i])
+        
+        deleted_gamma_indices = np.where(min_dists < distance_threshold)[0]
+        spacepoints_with_deleted_gamma.append(np.delete(spacepoints[event_i], deleted_gamma_indices, axis=0))
 
-        downsampled_true_gamma1_EDep_spacepoints[event_i] = energy_weighted_density_sampling(true_gamma1_EDep_spacepoints[event_i], true_gamma1_EDep_spacepoints_edep[event_i], 500, rng)
-        downsampled_true_gamma2_EDep_spacepoints[event_i] = energy_weighted_density_sampling(true_gamma2_EDep_spacepoints[event_i], true_gamma2_EDep_spacepoints_edep[event_i], 500, rng)
-        downsampled_other_particles_EDep_spacepoints[event_i] = energy_weighted_density_sampling(other_particles_EDep_spacepoints[event_i], other_particles_EDep_spacepoints_edep[event_i], 500, rng)
+    return spacepoints_with_deleted_gamma
 
-    return (downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-            downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints)
+
+def downsample_spacepoints(spacepoints, reco_nu_vtx, rng=None, close_to_reco_nu_vtx_threshold=200, how="fps", num_events=None, spacepoints_edep=None):
+
+    downsampled_spacepoints = {}
+    if num_events is None:
+        num_events = len(spacepoints)
+
+    for event_i in tqdm(range(num_events)):
+        nearby_reco_nu_vtx_indices = np.where(np.sqrt((spacepoints[event_i][:, 0] - reco_nu_vtx[event_i][0])**2
+                                                    + (spacepoints[event_i][:, 1] - reco_nu_vtx[event_i][1])**2
+                                                    + (spacepoints[event_i][:, 2] - reco_nu_vtx[event_i][2])**2) < close_to_reco_nu_vtx_threshold)[0]
+        nearby_spacepoints = spacepoints[event_i][nearby_reco_nu_vtx_indices, :]
+        if spacepoints_edep is not None:
+            nearby_spacepoints_edep = spacepoints_edep[event_i][nearby_reco_nu_vtx_indices]
+        else:
+            nearby_spacepoints_edep = None
+
+        if how == "fps":
+            downsampled_spacepoints[event_i] = fps_clustering_downsample(nearby_spacepoints, 500, rng)
+        elif how == "energy_weighted_density":
+            downsampled_spacepoints[event_i] = energy_weighted_density_sampling(nearby_spacepoints, nearby_spacepoints_edep, 500, rng)
+
+
+    return downsampled_spacepoints
+
 
 def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-                                            downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints, 
-                                            num_events):
+                                            downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints,
+                                            distance_threshold = 5, num_events=None):
     
-    print("categorizing downsampled reco spacepoints")
-    
+    if num_events is None:
+        num_events = len(downsampled_Tcluster_spacepoints)
+        
     real_nu_reco_nu_downsampled_spacepoints = []
     real_nu_reco_cosmic_downsampled_spacepoints = []
     real_cosmic_reco_nu_downsampled_spacepoints = []
@@ -519,10 +518,7 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
     real_gamma2_downsampled_spacepoints = []
     real_other_particles_downsampled_spacepoints = []
     real_cosmic_downsampled_spacepoints = []
-
-    close_to_true_nu_spacepoint_threshold = 5
-    close_to_reco_nu_spacepoint_threshold = 5
-    close_to_true_particle_spacepoint_threshold = 5
+    
 
     for event_i in tqdm(range(num_events)):
 
@@ -557,16 +553,16 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
         min_other_particles_dists_flat = min_other_particles_dists.flatten() if min_other_particles_dists.size > 0 else np.full(num_spacepoints, np.inf)
         
         # Assign gamma1 (highest priority)
-        gamma1_mask = (min_true_gamma1_dists_flat < close_to_true_particle_spacepoint_threshold)
+        gamma1_mask = (min_true_gamma1_dists_flat < distance_threshold)
         category_assignments[gamma1_mask] = 0  # gamma1
         
         # Assign gamma2 (second priority) - only if not already assigned to gamma1
-        gamma2_mask = (min_true_gamma2_dists_flat < close_to_true_particle_spacepoint_threshold)
+        gamma2_mask = (min_true_gamma2_dists_flat < distance_threshold)
         gamma2_mask = gamma2_mask & (category_assignments == -1)  # only unassigned spacepoints
         category_assignments[gamma2_mask] = 1  # gamma2
         
         # Assign other particles (third priority) - only if not already assigned
-        other_mask = (min_other_particles_dists_flat < close_to_true_particle_spacepoint_threshold)
+        other_mask = (min_other_particles_dists_flat < distance_threshold)
         other_mask = other_mask & (category_assignments == -1)  # only unassigned spacepoints
         category_assignments[other_mask] = 2  # other_particles
         
@@ -581,10 +577,10 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
         cosmic_indices = np.where(category_assignments == 3)[0]
         
         # For the nu/cosmic categorization (keeping original logic for these)
-        close_to_truth_indices = np.where(min_truth_dists < close_to_true_nu_spacepoint_threshold)[0]
-        far_from_truth_indices = np.where(min_truth_dists >= close_to_true_nu_spacepoint_threshold)[0]
-        close_to_reco_nu_indices = np.where(min_reco_nu_dists < close_to_reco_nu_spacepoint_threshold)[0]
-        far_from_reco_nu_indices = np.where(min_reco_nu_dists >= close_to_reco_nu_spacepoint_threshold)[0]
+        close_to_truth_indices = np.where(min_truth_dists < distance_threshold)[0]
+        far_from_truth_indices = np.where(min_truth_dists >= distance_threshold)[0]
+        close_to_reco_nu_indices = np.where(min_reco_nu_dists < distance_threshold)[0]
+        far_from_reco_nu_indices = np.where(min_reco_nu_dists >= distance_threshold)[0]
 
         # categorize spacepoints here
         real_nu_reco_nu_indices = np.intersect1d(close_to_reco_nu_indices, close_to_truth_indices)
@@ -636,23 +632,30 @@ if __name__ == "__main__":
         num_events = int(args.num_events)
 
     if args.fraction_of_events_with_deleted_photons == 0:
-        deleted_gamma_2_indices = None
+        deleted_gamma_indices = None
     else:
-        deleted_gamma_2_indices = rng.choice([0, 1], size=num_events, p=[1 - args.fraction_of_events_with_deleted_photons, args.fraction_of_events_with_deleted_photons])
-        deleted_gamma_2_indices = np.where(deleted_gamma_2_indices == 1)[0]
-        print(f"deleted gamma 2 in {len(deleted_gamma_2_indices)} / {num_events} events")
+        deleted_gamma_indices = rng.choice([0, 1], size=num_events, p=[1 - args.fraction_of_events_with_deleted_photons, args.fraction_of_events_with_deleted_photons])
+        deleted_gamma_indices = np.where(deleted_gamma_indices == 1)[0]
+        print(f"deleted gamma 2 in {len(deleted_gamma_indices)} / {num_events} events")
+
+    print("Getting true neutrino and gamma information...")
     
-    true_nu_vtx, reco_nu_vtx, true_gamma_info_df, deleted_gamma_2_pf_indices = get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_2_indices)
+    true_nu_vtx, reco_nu_vtx, true_gamma_info_df, deleted_gamma_pf_indices = get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices)
 
     #print(true_gamma_info_df.head())
 
-    true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types = get_geant_points(f, num_events, deleted_gamma_2_indices, deleted_gamma_2_pf_indices)
+    print("Getting true Geant4 spatial information to categorize spacepoints...")
+
+    true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types = get_geant_points(f, num_events=num_events, num_interpolated_points=5, 
+                                                                                                                                deleted_gamma_indices=deleted_gamma_indices, 
+                                                                                                                                deleted_gamma_pf_indices=deleted_gamma_pf_indices)
+    
+
+    print("Loading all spacepoints from root file...")
 
     Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, TrueEDep_spacepoints_edep = load_all_spacepoints(f, num_events)
 
-    # TODO: decide exactly how to handle deleted_photon_types
-    # Should be deleted before downsampling to preserve 500 points, but currently the categorization is done after downsampling
-    # Maybe the plan should be to delete the un-downsampled Tcluster spacepoints close to the deleted photon, before any downsampling
+    print("Categorizing true energy depositions into gamma1, gamma2, and other particles...")
 
     categorized_outputs = categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, num_events)
     true_gamma1_EDep_spacepoints = categorized_outputs[0]
@@ -662,23 +665,46 @@ if __name__ == "__main__":
     other_particles_EDep_spacepoints = categorized_outputs[4]
     other_particles_EDep_spacepoints_edep = categorized_outputs[5]
 
-    downsampled_spacepoint_outputs = downsample_spacepoints(Tcluster_spacepoints, Trec_spacepoints, 
-                                                     TrueEDep_spacepoints, TrueEDep_spacepoints_edep, 
-                                                     true_gamma1_EDep_spacepoints, true_gamma1_EDep_spacepoints_edep, 
-                                                     true_gamma2_EDep_spacepoints, true_gamma2_EDep_spacepoints_edep, 
-                                                     other_particles_EDep_spacepoints, other_particles_EDep_spacepoints_edep, 
-                                                     num_events, reco_nu_vtx, rng, deleted_photon_types)
+    print("Downsampling true energy deposition spacepoints...")
 
-    downsampled_Tcluster_spacepoints = downsampled_spacepoint_outputs[0]
-    downsampled_Trec_spacepoints = downsampled_spacepoint_outputs[1]
-    downsampled_TrueEDep_spacepoints = downsampled_spacepoint_outputs[2]
-    downsampled_true_gamma1_EDep_spacepoints = downsampled_spacepoint_outputs[3]
-    downsampled_true_gamma2_EDep_spacepoints = downsampled_spacepoint_outputs[4]
-    downsampled_other_particles_EDep_spacepoints = downsampled_spacepoint_outputs[5]
+    downsampled_true_gamma1_EDep_spacepoints = downsample_spacepoints(true_gamma1_EDep_spacepoints, reco_nu_vtx, rng, how="energy_weighted_density", num_events=num_events, spacepoints_edep=true_gamma1_EDep_spacepoints_edep)
+    downsampled_true_gamma2_EDep_spacepoints = downsample_spacepoints(true_gamma2_EDep_spacepoints, reco_nu_vtx, rng, how="energy_weighted_density", num_events=num_events, spacepoints_edep=true_gamma2_EDep_spacepoints_edep)
+    downsampled_other_particles_EDep_spacepoints = downsample_spacepoints(other_particles_EDep_spacepoints, reco_nu_vtx, rng, how="energy_weighted_density", num_events=num_events, spacepoints_edep=other_particles_EDep_spacepoints_edep)
+    downsampled_TrueEDep_spacepoints = downsample_spacepoints(TrueEDep_spacepoints, reco_nu_vtx, rng, how="energy_weighted_density", num_events=num_events, spacepoints_edep=TrueEDep_spacepoints_edep)
 
-    categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
-                                                                downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints, 
-                                                                num_events)
+    print("Possibly deleting one photon from true energy deposition spacepoints...")
+
+    downsampled_deleted_gamma_EDep_spacepoints = []
+    downsampled_remaining_true_gamma1_EDep_spacepoints = []
+    downsampled_remaining_true_gamma2_EDep_spacepoints = []
+    for event_i in range(num_events):
+        if deleted_photon_types[event_i] == 1:
+            downsampled_deleted_gamma_EDep_spacepoints.append(downsampled_true_gamma1_EDep_spacepoints[event_i])
+            downsampled_remaining_true_gamma1_EDep_spacepoints.append(np.empty((0, 3)))
+            downsampled_remaining_true_gamma2_EDep_spacepoints.append(downsampled_true_gamma2_EDep_spacepoints[event_i])
+        elif deleted_photon_types[event_i] == 2:
+            downsampled_deleted_gamma_EDep_spacepoints.append(downsampled_true_gamma2_EDep_spacepoints[event_i])
+            downsampled_remaining_true_gamma1_EDep_spacepoints.append(downsampled_true_gamma1_EDep_spacepoints[event_i])
+            downsampled_remaining_true_gamma2_EDep_spacepoints.append(np.empty((0, 3)))
+        else:
+            downsampled_deleted_gamma_EDep_spacepoints.append(np.empty((0, 3)))
+            downsampled_remaining_true_gamma1_EDep_spacepoints.append(downsampled_true_gamma1_EDep_spacepoints[event_i])
+            downsampled_remaining_true_gamma2_EDep_spacepoints.append(downsampled_true_gamma2_EDep_spacepoints[event_i])
+
+    Tcluster_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(Tcluster_spacepoints, downsampled_deleted_gamma_EDep_spacepoints, num_events=num_events)
+    Trec_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(Trec_spacepoints, downsampled_deleted_gamma_EDep_spacepoints, num_events=num_events)
+
+    print("Downsampling reco spacepoints...")
+    
+    downsampled_Tcluster_spacepoints_with_deleted_gamma = downsample_spacepoints(Tcluster_spacepoints_with_deleted_gamma, reco_nu_vtx, rng, how="fps", num_events=num_events)
+    downsampled_Trec_spacepoints_with_deleted_gamma = downsample_spacepoints(Trec_spacepoints_with_deleted_gamma, reco_nu_vtx, rng, how="fps", num_events=num_events)
+
+    print("Categorizing downsampled reco spacepoints...")
+
+    categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints_with_deleted_gamma, downsampled_Trec_spacepoints_with_deleted_gamma, 
+                                                                                               downsampled_TrueEDep_spacepoints, downsampled_remaining_true_gamma1_EDep_spacepoints, 
+                                                                                               downsampled_remaining_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints, 
+                                                                                               num_events=num_events)
 
     real_nu_reco_nu_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[0]
     real_nu_reco_cosmic_downsampled_spacepoints = categorized_downsampled_reco_spacepoints_outputs[1]
