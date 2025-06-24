@@ -79,7 +79,7 @@ class SpacepointDataset(Dataset):
         self.real_other_particles_downsampled_spacepoints = [self.real_other_particles_downsampled_spacepoints[i] for i in shuffled_indices]
         self.real_cosmic_downsampled_spacepoints = [self.real_cosmic_downsampled_spacepoints[i] for i in shuffled_indices]
 
-        self.global_y = torch.tensor(self.true_gamma_info_df["true_num_gamma_one_pairconvert_in_FV_20_MeV"].values, dtype=torch.long)
+        self.global_y = torch.tensor(self.true_gamma_info_df["true_one_pairconvert_in_FV_20_MeV"].values, dtype=torch.long)
         
         print("Creating spacepoint tensors")
         

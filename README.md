@@ -4,7 +4,10 @@ A machine-learning based tool to identify a missed second shower from a Pi0 that
 
 Similar idea to the Second Shower Veto (SSV) used in [Phys. Rev. Lett. 128, 111801 (2022)](https://doi.org/10.1103/PhysRevLett.128.111801).
 
-The neural network uses the PointNet++ architecture https://github.com/charlesq34/pointnet2, implemented in PyTorch from https://github.com/yanx27/Pointnet_Pointnet2_pytorch.
+# To get prerequisite code from [Point Transformer V3](https://github.com/Pointcept/PointTransformerV3):
+```
+curl -o models/PointTransformerV3_model.py https://raw.githubusercontent.com/Pointcept/PointTransformerV3/refs/heads/main/model.py
+```
 
 # To set up the python environment:
 ```

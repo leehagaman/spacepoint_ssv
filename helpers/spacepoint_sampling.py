@@ -36,7 +36,7 @@ def fps_sampling(points, n_samples, rng=None):
     
     return sampled_points
 
-def fps_clustering_downsample(points, n_samples, rng=None, debug=False):
+def fps_clustering_downsample(points, n_samples, rng=None):
     """
     Downsample the point cloud using FPS and clustering.
     
@@ -45,32 +45,26 @@ def fps_clustering_downsample(points, n_samples, rng=None, debug=False):
     :param rng: random number generator instance
     :return: downsampled point cloud
     """
+
     if rng is None:
         rng = np.random.default_rng()
 
     if len(points) == 0 or n_samples == 0: return np.empty((0, 3))
 
-    if debug:
-        print(f"downsampling {points.shape[0]} points to {n_samples} points")
+    # Remove duplicate points to avoid KMeans convergence issues
+    rounded_points = np.round(points, decimals=5)
+    unique_indices = np.unique(rounded_points, axis=0, return_index=True)[1]
+    points = points[unique_indices]
 
-    if debug:
-        print(f"performing FPS...", end="", flush=True)
+    if len(points) < n_samples:
+        n_samples = len(points)
 
     # Perform FPS to get initial samples
     sampled_points = fps_sampling(points, n_samples, rng)
-    
-    if debug:
-        print(f"done", flush=True)
-
-    if debug:
-        print(f"performing KMeans...", end="", flush=True)
 
     # Use K-means clustering to associate other points with the samples
     kmeans = KMeans(n_clusters=n_samples, init=sampled_points, n_init=1)
     kmeans.fit(points)
-
-    if debug:
-        print(f"done", flush=True)
         
     return kmeans.cluster_centers_
 
