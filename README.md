@@ -6,7 +6,7 @@ Similar idea to the Second Shower Veto (SSV) used in [Phys. Rev. Lett. 128, 1118
 
 # To get prerequisite code from [Point Transformer V3](https://github.com/Pointcept/PointTransformerV3):
 ```
-curl -o models/PointTransformerV3_model.py https://raw.githubusercontent.com/Pointcept/PointTransformerV3/refs/heads/main/model.py
+curl -o models/PointTransformerV3_model.py https://raw.githubusercontent.com/Pointcept/PointTransformerV3/ac4ef87a679ce2072335c915555058c68fb0b09d/model.py
 ```
 
 # To set up the python environment:
@@ -14,7 +14,7 @@ curl -o models/PointTransformerV3_model.py https://raw.githubusercontent.com/Poi
 python3 -m venv venv
 source venv/bin/activate # run this again each time you interact with the code, the rest of the steps here are only needed once
 # run the command corresponding to your machine and pip here: https://pytorch.org, for example `pip install torch torchvision torchaudio` on Mac
-pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplotlib plotly scikit-learn
+pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplotlib plotly scikit-learn addict
 ```
 
 # To preprocess the spacepoints from a root file:

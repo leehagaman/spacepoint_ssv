@@ -68,7 +68,7 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
     def __init__(
         self,
         # Event categorization parameters
-        num_event_classes: int = 10,
+        num_event_classes: int = 4,
         event_hidden_channels: List[int] = [512, 256],
         event_dropout: float = 0.5,
         enable_event_classification: bool = True,
@@ -169,27 +169,3 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         
         losses['total_loss'] = total_loss
         return losses
-
-
-# Example usage and factory function
-def create_multitask_ptv3(
-    num_point_classes: int,
-    num_event_classes: int,
-    **ptv3_kwargs
-) -> MultiTaskPointTransformerV3:
-    """
-    Factory function to create a multi-task PointTransformerV3 model.
-    
-    Args:
-        num_point_classes: Number of classes for point-wise classification
-        num_event_classes: Number of classes for event categorization
-        **ptv3_kwargs: Additional arguments for PointTransformerV3
-    
-    Returns:
-        Configured MultiTaskPointTransformerV3 model
-    """
-    return MultiTaskPointTransformerV3(
-        num_event_classes=num_event_classes,
-        enable_event_classification=True,
-        **ptv3_kwargs
-    )

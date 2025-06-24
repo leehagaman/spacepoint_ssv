@@ -8,12 +8,7 @@ import torch
 import os
 from datetime import datetime
 from dataloader import create_dataloaders
-from models.my_pointnet_model import get_model, get_loss
-
-# TODO: support multi-GPU training
-# torchrun --standalone --nproc_per_node=4 train.py
-# reference: https://github.com/karpathy/nanoGPT/blob/master/train.py
-
+from models.my_PointTransformer_model import MultiTaskPointTransformerV3, get_loss
 
 def train_step(model, train_dataloader, optimizer, criterion, device, epoch, args):
 
@@ -250,7 +245,7 @@ if __name__ == "__main__":
     # Get a sample batch to determine input dimensions
     sample_batch_x, sample_batch_y, sample_batch_global_y = next(iter(train_dataloader))
     
-    model = get_model()
+    model = MultiTaskPointTransformerV3()
     model = model.to(device)
 
     print(f"created model with {sum(p.numel() for p in model.parameters())} parameters")
