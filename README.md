@@ -28,7 +28,7 @@ pip install spconv-cu126
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu126.html
 pip install flash-attn --no-build-isolation
 
-pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplotlib plotly scikit-learn addict timm
+pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplotlib plotly scikit-learn addict timm wandb
 ```
 
 # To preprocess the spacepoints from a root file:

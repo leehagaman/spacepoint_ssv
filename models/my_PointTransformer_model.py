@@ -83,7 +83,7 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
 
         return results
 
-    def compute_loss(self, predictions, targets, permutation_invariant_pairs=None):
+    def compute_loss(self, predictions, targets):
 
         losses = {}
 
@@ -98,6 +98,7 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         swapped_point_labels[mask_gamma2] = 0
         swapped_point_loss = nn.CrossEntropyLoss()(point_logits, swapped_point_labels)
 
+        # don't care if gamma1 and gamma2 points are swapped, we just want to separate them into two categories
         point_loss = torch.min(point_loss, swapped_point_loss)
         losses['point_loss'] = point_loss
 

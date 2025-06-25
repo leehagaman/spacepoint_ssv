@@ -12,5 +12,8 @@ venv/
 
 models/PointTransformerV3
 
+wandb/
+temp_plot.jpeg
+
 training_files/
 !training_files/.gitkeep
