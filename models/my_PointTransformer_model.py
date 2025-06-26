@@ -33,11 +33,11 @@ class EventCategorizationHead(nn.Module):
             start_idx = offsets[i]
             end_idx = offsets[i + 1]
             batch_feat = point_features.feat[start_idx:end_idx]
-            global_feat = torch.mean(batch_feat, dim=0)
-            batch_features.append(global_feat)
+            event_feat = torch.mean(batch_feat, dim=0)
+            batch_features.append(event_feat)
 
-        global_features = torch.stack(batch_features, dim=0)
-        return self.classifier(global_features)
+        event_features = torch.stack(batch_features, dim=0)
+        return self.classifier(event_features)
 
 
 class MultiTaskPointTransformerV3(PointTransformerV3):

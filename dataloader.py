@@ -79,7 +79,7 @@ class SpacepointDataset(Dataset):
         self.real_other_particles_downsampled_spacepoints = [self.real_other_particles_downsampled_spacepoints[i] for i in shuffled_indices]
         self.real_cosmic_downsampled_spacepoints = [self.real_cosmic_downsampled_spacepoints[i] for i in shuffled_indices]
 
-        self.global_y = torch.tensor(self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1, dtype=torch.long)
+        self.event_y = torch.tensor(self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1, dtype=torch.long)
         
         print("Creating spacepoint tensors")
         
@@ -123,12 +123,12 @@ class SpacepointDataset(Dataset):
         """Get a specific event from the dataset.
         
         Returns:
-            tuple: (spacepoint_coordinates, labels, global_label)
+            tuple: (spacepoint_coordinates, labels, event_label)
             spacepoint_coordinates: tensor of shape (3, 500) for xyz coordinates
             labels: tensor of shape (500,) for point labels
-            global_label: tensor of shape () for event-level label
+            event_label: tensor of shape () for event-level label
         """
-        return self.x[idx], self.y[idx], self.global_y[idx]
+        return self.x[idx], self.y[idx], self.event_y[idx]
 
 
 def create_dataloaders(pickle_file,

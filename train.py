@@ -14,11 +14,10 @@ from datetime import datetime
 from dataloader import create_dataloaders
 from models.my_PointTransformer_model import MultiTaskPointTransformerV3
 
-# Import wandb for experiment tracking
 import wandb
 
-# Import additional libraries for metrics and plotting
 import matplotlib.pyplot as plt
+plt.rcParams.update({'font.size': 16})
 from sklearn.metrics import confusion_matrix
 
 def train_step(model, train_dataloader, optimizer, device, epoch, args):
@@ -26,30 +25,30 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
     model.train()
     train_loss = 0.0
     train_correct = 0
-    train_global_correct = 0
+    train_event_correct = 0
     train_total = 0
-    train_global_total = 0
+    train_event_total = 0
     
     # Track batch-level metrics for wandb
     batch_losses = []
     batch_point_losses = []
     batch_event_losses = []
     batch_point_accuracies = []
-    batch_global_accuracies = []
+    batch_event_accuracies = []
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
-    for batch_idx, (batch_x, batch_y, batch_global_y) in enumerate(train_pbar):
+    for batch_idx, (batch_x, batch_y, batch_event_y) in enumerate(train_pbar):
         # batch_x has shape (B, 3, 500) where B is batch size (number of events)
         # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
         batch_x = batch_x.to(device)
         batch_y = batch_y.to(device)
-        batch_global_y = batch_global_y.to(device)
+        batch_event_y = batch_event_y.to(device)
         
         # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
         B, C, N = batch_x.shape
         batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
         batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
-        batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
+        batch_event_y_reshaped = batch_event_y.reshape(B)  # Shape: (B,)
         
         optimizer.zero_grad()
         
@@ -70,7 +69,7 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         # Prepare targets for loss computation
         targets = {
             'point_labels': batch_y_reshaped,
-            'event_labels': batch_global_y_reshaped
+            'event_labels': batch_event_y_reshaped
         }
         
         # Compute loss using model's compute_loss method
@@ -95,25 +94,25 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         train_total += batch_y_reshaped.size(0)
         train_correct += (predicted == batch_y_reshaped).sum().item()
         
-        # Statistics for global predictions
+        # Statistics for event predictions
         if 'event_logits' in predictions:
             event_logits = predictions['event_logits']  # [B, num_event_classes]
-            global_predicted = torch.argmax(event_logits, dim=1)  # [B]
-            train_global_correct += (global_predicted == batch_global_y_reshaped).sum().item()
-            train_global_total += B
+            event_predicted = torch.argmax(event_logits, dim=1)  # [B]
+            train_event_correct += (event_predicted == batch_event_y_reshaped).sum().item()
+            train_event_total += B
         
         # Calculate batch-level metrics
         batch_point_accuracy = 100 * (predicted == batch_y_reshaped).sum().item() / batch_y_reshaped.size(0)
-        batch_global_accuracy = 0
+        batch_event_accuracy = 0
         if 'event_logits' in predictions:
-            batch_global_accuracy = 100 * (global_predicted == batch_global_y_reshaped).sum().item() / B
+            batch_event_accuracy = 100 * (event_predicted == batch_event_y_reshaped).sum().item() / B
         
         # Store batch metrics for wandb
         batch_losses.append(total_loss.item())
         batch_point_losses.append(point_loss.item())
         batch_event_losses.append(event_loss.item())
         batch_point_accuracies.append(batch_point_accuracy)
-        batch_global_accuracies.append(batch_global_accuracy)
+        batch_event_accuracies.append(batch_event_accuracy)
         
         # Log batch metrics to wandb if enabled
         if args.wandb:
@@ -129,7 +128,7 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
                 'train/batch_point_loss': point_loss.item(),
                 'train/batch_event_loss': event_loss.item(),
                 'train/batch_point_accuracy': batch_point_accuracy,
-                'train/batch_global_accuracy': batch_global_accuracy,
+                'train/batch_event_accuracy': batch_event_accuracy,
                 'train/learning_rate': optimizer.param_groups[0]['lr'],
                 'train/gradient_norm': grad_norm,
                 'train/batch': batch_idx,
@@ -142,29 +141,24 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
             'Point_Loss': f'{point_loss.item():.4f}',
             'Event_Loss': f'{event_loss.item():.4f}',
             'Point_Acc': f'{100 * train_correct / train_total:.2f}%',
-            'Global_Acc': f'{100 * train_global_correct / train_global_total:.2f}%' if train_global_total > 0 else 'N/A'
+            'event_Acc': f'{100 * train_event_correct / train_event_total:.2f}%' if train_event_total > 0 else 'N/A'
         })
     
     avg_train_loss = train_loss / len(train_dataloader)
     train_accuracy = 100 * train_correct / train_total
-    train_global_accuracy = 100 * train_global_correct / train_global_total if train_global_total > 0 else 0
+    train_event_accuracy = 100 * train_event_correct / train_event_total if train_event_total > 0 else 0
 
-    return avg_train_loss, train_accuracy, train_global_accuracy
+    return avg_train_loss, train_accuracy, train_event_accuracy
 
 
-def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss):
+def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_event_accuracy, best_test_loss):
 
     model.eval()
     test_loss = 0.0
     test_correct = 0
-    test_correct_global = 0
+    test_correct_event = 0
     test_total = 0
-    test_global_total = 0
-
-    test_num_cosmic_guesses = 0
-    test_num_gamma1_guesses = 0
-    test_num_gamma2_guesses = 0
-    test_num_other_particles_guesses = 0
+    test_event_total = 0
 
     num_test_events = 0
     
@@ -173,16 +167,37 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
     batch_point_losses = []
     batch_event_losses = []
     batch_point_accuracies = []
-    batch_global_accuracies = []
+    batch_event_accuracies = []
     
+    # For point-level confusion matrix and point category histogram
+    all_point_predictions = []
+    all_point_true_labels = []
+
+    # for event-level score histogram
+    all_event_probs = []
+    all_event_true_labels = []
+    
+    # for spacepoint-level visualization
+    num_spacepoint_plot_events = 4
+    subset_sig_point_predictions = []
+    subset_sig_point_true_labels = []
+    subset_sig_spacepoints = []
+    subset_sig_event_predictions = []
+    subset_sig_event_true_labels = []
+    subset_bkg_point_predictions = []
+    subset_bkg_point_true_labels = []
+    subset_bkg_spacepoints = []
+    subset_bkg_event_predictions = []
+    subset_bkg_event_true_labels = []
+
     with torch.no_grad():
         test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
-        for batch_idx, (batch_x, batch_y, batch_global_y) in enumerate(test_pbar):
+        for batch_idx, (batch_x, batch_y, batch_event_y) in enumerate(test_pbar):
             # batch_x has shape (B, 3, 500) where B is batch size (number of events)
             # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
-            batch_global_y = batch_global_y.to(device)
+            batch_event_y = batch_event_y.to(device)
 
             B, C, N = batch_x.shape
             num_test_events += B
@@ -190,7 +205,7 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
             batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
             batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
-            batch_global_y_reshaped = batch_global_y.reshape(B)  # Shape: (B,)
+            batch_event_y_reshaped = batch_event_y.reshape(B)  # Shape: (B,)
             
             # Prepare data for MultiTaskPointTransformerV3
             coord = batch_x_reshaped.contiguous()  # [B*N, 3] - make contiguous
@@ -209,7 +224,7 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             # Prepare targets for loss computation
             targets = {
                 'point_labels': batch_y_reshaped,
-                'event_labels': batch_global_y_reshaped
+                'event_labels': batch_event_y_reshaped
             }
             
             # Compute loss using model's compute_loss method
@@ -230,30 +245,32 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             test_total += batch_y_reshaped.size(0)
             test_correct += (predicted == batch_y_reshaped).sum().item()
             
-            # Statistics for global predictions
-            if 'event_logits' in predictions:
-                event_logits = predictions['event_logits']  # [B, num_event_classes]
-                global_predicted = torch.argmax(event_logits, dim=1)  # [B]
-                test_correct_global += (global_predicted == batch_global_y_reshaped).sum().item()
-                test_global_total += B
+            event_logits = predictions['event_logits']  # [B, num_event_classes]
+            event_predicted = torch.argmax(event_logits, dim=1)  # [B]
+            test_correct_event += (event_predicted == batch_event_y_reshaped).sum().item()
+            test_event_total += B
 
-            test_num_gamma1_guesses += predicted.eq(0).sum().item()
-            test_num_gamma2_guesses += predicted.eq(1).sum().item()
-            test_num_other_particles_guesses += predicted.eq(2).sum().item()
-            test_num_cosmic_guesses += predicted.eq(3).sum().item()
+            predicted_reshaped = predicted.reshape(B, N)
+            predicted_by_event = [predicted_reshaped[i].cpu().numpy() for i in range(B)]
+            true_labels_reshaped = batch_y_reshaped.reshape(B, N)
+            true_labels_by_event = [true_labels_reshaped[i].cpu().numpy() for i in range(B)]
+
+            coords = data_dict['coord']
+            coords_reshaped = coords.reshape(B, N, C)
+            coords_by_event = [coords_reshaped[i].cpu().numpy() for i in range(B)]
             
             # Calculate batch-level metrics
             batch_point_accuracy = 100 * (predicted == batch_y_reshaped).sum().item() / batch_y_reshaped.size(0)
-            batch_global_accuracy = 0
+            batch_event_accuracy = 0
             if 'event_logits' in predictions:
-                batch_global_accuracy = 100 * (global_predicted == batch_global_y_reshaped).sum().item() / B
+                batch_event_accuracy = 100 * (event_predicted == batch_event_y_reshaped).sum().item() / B
             
             # Store batch metrics for wandb
             batch_losses.append(total_loss.item())
             batch_point_losses.append(point_loss.item())
             batch_event_losses.append(event_loss.item())
             batch_point_accuracies.append(batch_point_accuracy)
-            batch_global_accuracies.append(batch_global_accuracy)
+            batch_event_accuracies.append(batch_event_accuracy)
             
             # Log batch metrics to wandb if enabled
             if args.wandb:
@@ -262,10 +279,33 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
                     'test/batch_point_loss': point_loss.item(),
                     'test/batch_event_loss': event_loss.item(),
                     'test/batch_point_accuracy': batch_point_accuracy,
-                    'test/batch_global_accuracy': batch_global_accuracy,
+                    'test/batch_event_accuracy': batch_event_accuracy,
                     'test/batch': batch_idx,
                     'test/epoch': epoch
                 })
+            
+            # Save variables to create extra metrics occasionally
+            if (True or args.wandb) and (epoch % 5 == 0 or epoch == args.num_epochs - 1):
+                all_point_predictions.extend(predicted_by_event)
+                all_point_true_labels.extend(true_labels_by_event)
+
+                event_probs = torch.softmax(event_logits, dim=1)[:, 1].cpu().numpy()
+                all_event_probs.extend(event_probs)
+                all_event_true_labels.extend(batch_event_y_reshaped.cpu().numpy())
+
+                for event_i in range(B):
+                    if len(subset_sig_point_predictions) < num_spacepoint_plot_events and batch_event_y_reshaped[event_i] == 1:
+                        subset_sig_point_predictions.append(predicted_by_event[event_i])
+                        subset_sig_point_true_labels.append(true_labels_by_event[event_i])
+                        subset_sig_spacepoints.append(coords_by_event[event_i])
+                        subset_sig_event_predictions.append(event_probs[event_i])
+                        subset_sig_event_true_labels.append(batch_event_y_reshaped[event_i])
+                    elif len(subset_bkg_point_predictions) < num_spacepoint_plot_events and batch_event_y_reshaped[event_i] == 0:
+                        subset_bkg_point_predictions.append(predicted_by_event[event_i])
+                        subset_bkg_point_true_labels.append(true_labels_by_event[event_i])
+                        subset_bkg_spacepoints.append(coords_by_event[event_i])
+                        subset_bkg_event_predictions.append(event_probs[event_i])
+                        subset_bkg_event_true_labels.append(batch_event_y_reshaped[event_i])
             
             # Update progress bar
             test_pbar.set_postfix({
@@ -273,254 +313,232 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
                 'Point_Loss': f'{point_loss.item():.4f}',
                 'Event_Loss': f'{event_loss.item():.4f}',
                 'Point Acc': f'{100 * test_correct / test_total:.2f}%',
-                'Global Acc': f'{100 * test_correct_global / test_global_total:.2f}%' if test_global_total > 0 else 'N/A'
+                'event Acc': f'{100 * test_correct_event / test_event_total:.2f}%' if test_event_total > 0 else 'N/A'
             })
     
     avg_test_loss = test_loss / len(test_dataloader)
     test_accuracy = 100 * test_correct / test_total
-    test_global_accuracy = 100 * test_correct_global / test_global_total if test_global_total > 0 else 0
+    test_event_accuracy = 100 * test_correct_event / test_event_total if test_event_total > 0 else 0
     
     # Learning rate scheduling
     scheduler.step(avg_test_loss)
     
-    # Calculate average guesses per event
-    avg_cosmic_guesses = test_num_cosmic_guesses / num_test_events
-    avg_gamma1_guesses = test_num_gamma1_guesses / num_test_events
-    avg_gamma2_guesses = test_num_gamma2_guesses / num_test_events
-    avg_other_particles_guesses = test_num_other_particles_guesses / num_test_events
-    
     # Log epoch metrics to wandb if enabled
-    if True or args.wandb:
-        # Calculate confusion matrix for point classification (only every 5 epochs to save time)
-        if True or epoch % 5 == 0 or epoch == args.num_epochs - 1:
-            # Get all predictions and true labels for confusion matrix
-            all_point_predictions = []
-            all_true_point_labels = []
-            
-            model.eval()
+    if (True or args.wandb) and (epoch % 5 == 0 or epoch == args.num_epochs - 1):
+        
+        # flatten all_point_true_labels and all_point_predictions, so points from all events are together
+        flattened_all_point_true_labels = []
+        for all_point_true_labels_event in all_point_true_labels:
+            flattened_all_point_true_labels.extend(list(all_point_true_labels_event))
+        flattened_all_point_true_labels = np.array(flattened_all_point_true_labels)
+
+        flattened_all_point_predictions = []
+        for all_point_predictions_event in all_point_predictions:
+            #print(f"{all_point_predictions_event=}")
+            flattened_all_point_predictions.extend(list(all_point_predictions_event))
+        flattened_all_point_predictions = np.array(flattened_all_point_predictions)
+        
+        point_cm = confusion_matrix(flattened_all_point_true_labels, flattened_all_point_predictions)
+        class_names = ['Gamma1', 'Gamma2', 'Other', 'Cosmic']
+        point_confusion_fig, point_confusion_ax = plt.subplots(figsize=(8, 6))
+        im = point_confusion_ax.imshow(point_cm, interpolation='nearest', cmap='Blues')
+        point_confusion_fig.colorbar(im)
+        thresh = point_cm.max() / 2.
+        for i in range(point_cm.shape[0]):
+            for j in range(point_cm.shape[1]):
+                point_confusion_ax.text(j, i, format(point_cm[i, j], 'd'),
+                        ha="center", va="center",
+                        color="white" if point_cm[i, j] > thresh else "black")
+        
+        point_confusion_ax.set_title('Point Classification Confusion Matrix')
+        point_confusion_ax.set_ylabel('True Label')
+        point_confusion_ax.set_xlabel('Predicted Label')
+        point_confusion_ax.set_xticks(range(len(class_names)))
+        point_confusion_ax.set_xticklabels(class_names)
+        point_confusion_ax.set_yticks(range(len(class_names)))
+        point_confusion_ax.set_yticklabels(class_names)
+        point_confusion_fig.tight_layout()
 
 
-            with torch.no_grad():
-                for batch_x, batch_y, batch_global_y in test_dataloader:
-                    batch_x = batch_x.to(device)
-                    batch_y = batch_y.to(device)
-                    
-                    B, C, N = batch_x.shape
-                    batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)
-                    batch_y_reshaped = batch_y.reshape(B*N)
-                    
-                    coord = batch_x_reshaped.contiguous()
-                    batch_idx_tensor = torch.arange(B, device=device).repeat_interleave(N)
-                    
-                    data_dict = {
-                        'coord': coord,
-                        'feat': coord,
-                        'grid_size': torch.tensor(0.1, device=device),
-                        'batch': batch_idx_tensor
-                    }
-                    
-                    predictions = model(data_dict)
-                    point_logits = predictions['point_features'].feat
-                    _, predicted = torch.max(point_logits.data, 1)
-                    
-                    all_point_predictions.extend(predicted.cpu().numpy())
-                    all_true_point_labels.extend(batch_y_reshaped.cpu().numpy())
-            
-            # Create confusion matrix
-            cm = confusion_matrix(all_true_point_labels, all_point_predictions)
-            class_names = ['Gamma1', 'Gamma2', 'Other', 'Cosmic']
-            confusion_fig, confusion_ax = plt.subplots(figsize=(8, 6))
-            im = confusion_ax.imshow(cm, interpolation='nearest', cmap='Blues')
-            confusion_fig.colorbar(im)
-            thresh = cm.max() / 2.
-            for i in range(cm.shape[0]):
-                for j in range(cm.shape[1]):
-                    confusion_ax.text(j, i, format(cm[i, j], 'd'),
-                            ha="center", va="center",
-                            color="white" if cm[i, j] > thresh else "black")
-            
-            confusion_ax.set_title('Point Classification Confusion Matrix')
-            confusion_ax.set_ylabel('True Label')
-            confusion_ax.set_xlabel('Predicted Label')
-            confusion_ax.set_xticks(range(len(class_names)))
-            confusion_ax.set_xticklabels(class_names)
-            confusion_ax.set_yticks(range(len(class_names)))
-            confusion_ax.set_yticklabels(class_names)
-            confusion_fig.tight_layout()
+        # Create event score histogram
+        true_signal_probs = all_event_probs[all_event_true_labels == 1]
+        true_background_probs = all_event_probs[all_event_true_labels == 0]
+        bins = np.linspace(0, 1, 51)
+        lw = 2
 
-            # create an array of 2D projections of the spacepoints
-            # eight events, each with the guess on the left and the true on the right,
-            # causing 16 images total in the plot array
-            eight_events_predictions = []
-            eight_events_true_labels = []
-            eight_events_spacepoints = []
-            eight_events_pred_signal_probs = []
-            eight_events_true_signal = []
-            with torch.no_grad():
-                for batch_idx, (batch_x, batch_y, batch_global_y) in enumerate(test_dataloader):
-                    batch_x = batch_x.to(device)
-                    batch_y = batch_y.to(device)
-                    
-                    B, C, N = batch_x.shape
-                    # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
-                    batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
-                    batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
-                    
-                    coord = batch_x_reshaped.contiguous()  # [B*N, 3] - make contiguous
-                    batch_idx_tensor = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
-                    
-                    data_dict = {
-                        'coord': coord,
-                        'feat': coord,  # Use coordinates as initial features
-                        'grid_size': torch.tensor(0.1, device=device),  # Increased from 0.01 to 0.1
-                        'batch': batch_idx_tensor
-                    }
-                    
-                    predictions = model(data_dict)
+        event_score_fig, event_score_ax = plt.subplots(figsize=(8, 6))
+        event_score_ax.hist(true_signal_probs, bins=bins, histtype='step', label='True Signal', density=True, linewidth=lw)
+        event_score_ax.hist(true_background_probs, bins=bins, histtype='step', label='True Background', density=True, linewidth=lw)
+        event_score_ax.legend()
+        event_score_ax.set_xlabel('Output Signal Score')
+        event_score_ax.set_ylabel('Relative Number of Events')
+        event_score_fig.tight_layout()
 
-                    event_logits = predictions['event_logits']
-                    event_probs = torch.softmax(event_logits, dim=1)
-                    event_pred_signal_prob = list(event_probs[:, 1].cpu().numpy())
 
-                    event_true_labels = list(batch_global_y.reshape(B).cpu().numpy())
+        # Create point category histogram
 
-                    point_logits = predictions['point_features'].feat
-                    _, predicted = torch.max(point_logits.data, 1)
-                    reshaped_predicted = predicted.reshape(B, N)
-                    predicted_by_event = [reshaped_predicted[i].cpu().numpy() for i in range(B)]
+        true_gamma1_counts_by_event = [np.sum(true_labels_by_event[i] == 0) for i in range(len(true_labels_by_event))]
+        true_gamma2_counts_by_event = [np.sum(true_labels_by_event[i] == 1) for i in range(len(true_labels_by_event))]
+        true_other_counts_by_event = [np.sum(true_labels_by_event[i] == 2) for i in range(len(true_labels_by_event))]
+        true_cosmic_counts_by_event = [np.sum(true_labels_by_event[i] == 3) for i in range(len(true_labels_by_event))]
 
-                    reshaped_true_labels = batch_y_reshaped.reshape(B, N)
-                    true_labels_by_event = [reshaped_true_labels[i].cpu().numpy() for i in range(B)]
+        predicted_gamma1_counts_by_event = [np.sum(predicted_by_event[i] == 0) for i in range(len(predicted_by_event))]
+        predicted_gamma2_counts_by_event = [np.sum(predicted_by_event[i] == 1) for i in range(len(predicted_by_event))]
+        predicted_other_counts_by_event = [np.sum(predicted_by_event[i] == 2) for i in range(len(predicted_by_event))]
+        predicted_cosmic_counts_by_event = [np.sum(predicted_by_event[i] == 3) for i in range(len(predicted_by_event))]
 
-                    coords = data_dict['coord']
-                    reshaped_coords = coords.reshape(B, N, C)
-                    coords_by_event = [reshaped_coords[i].cpu().numpy() for i in range(B)]
+        bins = np.linspace(0, 500, 51)
 
-                    eight_events_spacepoints += coords_by_event
-                    eight_events_predictions += predicted_by_event
-                    eight_events_true_labels += true_labels_by_event
-                    eight_events_pred_signal_probs += event_pred_signal_prob
-                    eight_events_true_signal += event_true_labels
+        point_category_fig, point_category_ax = plt.subplots(figsize=(8, 6))
 
-                    print(f"appended one batch with {B} events")
+        lw = 2
 
-                    if len(eight_events_spacepoints) >= 8:
-                        print(f"length of eight_events_spacepoints: {len(eight_events_spacepoints)}, breaking")
-                        break
+        point_category_ax.hist(predicted_gamma1_counts_by_event, bins=bins, histtype='step', label='Gamma1', density=True, color="C0", linewidth=lw)
+        point_category_ax.hist(predicted_gamma2_counts_by_event, bins=bins, histtype='step', label='Gamma2', density=True, color="C1", linewidth=lw)
+        point_category_ax.hist(predicted_other_counts_by_event, bins=bins, histtype='step', label='Other', density=True, color="C2", linewidth=lw)
+        point_category_ax.hist(predicted_cosmic_counts_by_event, bins=bins, histtype='step', label='Cosmic', density=True, color="C3", linewidth=lw)
+        
+        point_category_ax.hist(true_gamma1_counts_by_event, bins=bins, histtype='step', density=True, color="C0", linestyle="--", linewidth=lw)
+        point_category_ax.hist(true_gamma2_counts_by_event, bins=bins, histtype='step', density=True, color="C1", linestyle="--", linewidth=lw)
+        point_category_ax.hist(true_other_counts_by_event, bins=bins, histtype='step', density=True, color="C2", linestyle="--", linewidth=lw)
+        point_category_ax.hist(true_cosmic_counts_by_event, bins=bins, histtype='step', density=True, color="C3", linestyle="--", linewidth=lw)
 
-            # sort the events by true signal category
-            sorted_indices = sorted(range(len(eight_events_true_signal)), key=lambda x: eight_events_true_signal[x])
-            eight_events_spacepoints = [eight_events_spacepoints[i] for i in sorted_indices]
-            eight_events_predictions = [eight_events_predictions[i] for i in sorted_indices]
-            eight_events_true_labels = [eight_events_true_labels[i] for i in sorted_indices]
-            eight_events_pred_signal_probs = [eight_events_pred_signal_probs[i] for i in sorted_indices]
-            eight_events_true_signal = [eight_events_true_signal[i] for i in sorted_indices]
+        point_category_ax.plot([], [], c="k", label="Predicted Category", linestyle="-", linewidth=lw)
+        point_category_ax.plot([], [], c="k", label="True Category", linestyle="--", linewidth=lw)
+        point_category_ax.legend()
 
-            print(f"{eight_events_true_signal=}")
+        point_category_ax.set_xlabel('Number of Points in Event')
+        point_category_ax.set_ylabel('Relative Number Events')
+        point_category_fig.tight_layout()
 
-            spacepoint_fig, axs = plt.subplots(4, 4, figsize=(10, 8))
-            for event_i in range(8):
-                pred_col = 2 * (event_i // 4)
-                true_col = 2 * (event_i // 4) + 1
-                row = event_i % 4
 
-                pred_colors = []
-                true_colors = []
-                for i in range(len(eight_events_spacepoints[event_i])):
-                    pred_label = eight_events_predictions[event_i][i]
-                    true_label = eight_events_true_labels[event_i][i]
+        # Create spacepoint-level visualization
+        spacepoint_fig, axs = plt.subplots(4, 4, figsize=(10, 8))
 
-                    if pred_label == 0:
-                        pred_colors.append('green')
-                    elif pred_label == 1:
-                        pred_colors.append('lightgreen')
-                    elif pred_label == 2:
-                        pred_colors.append('brown')
-                    else:
-                        pred_colors.append('blue')
+        for event_i in range(8):
 
-                    if true_label == 0:
-                        true_colors.append('green')
-                    elif true_label == 1:
-                        true_colors.append('lightgreen')
-                    elif true_label == 2:
-                        true_colors.append('brown')
-                    else:
-                        true_colors.append('blue')
+            subset_event_i = event_i % 4
 
-                axs[row, pred_col].scatter(eight_events_spacepoints[event_i][:, 2], eight_events_spacepoints[event_i][:, 0], s=1, c=pred_colors)
-                axs[row, true_col].scatter(eight_events_spacepoints[event_i][:, 2], eight_events_spacepoints[event_i][:, 0], s=1, c=true_colors)
+            pred_col = 2 * (event_i // 4)
+            true_col = 2 * (event_i // 4) + 1
+            row = event_i % 4
 
-                axs[row, pred_col].set_xticks([])
-                axs[row, pred_col].set_yticks([])
-                axs[row, true_col].set_xticks([])
-                axs[row, true_col].set_yticks([])
+            pred_colors = []
+            true_colors = []
 
-                non_true_cosmic_indices = [i for i in range(len(eight_events_spacepoints[event_i])) if eight_events_true_labels[event_i][i] != 3]
-                non_true_cosmic_spacepoints = np.array([eight_events_spacepoints[event_i][i] for i in non_true_cosmic_indices])
+            if pred_col == 0:
+                subset_point_predictions = subset_sig_point_predictions
+                subset_point_true_labels = subset_sig_point_true_labels
+                subset_point_spacepoints = subset_sig_spacepoints
+                subset_event_predictions = subset_sig_event_predictions
+                subset_event_true_labels = subset_sig_event_true_labels
+            else:
+                subset_point_predictions = subset_bkg_point_predictions
+                subset_point_true_labels = subset_bkg_point_true_labels
+                subset_point_spacepoints = subset_bkg_spacepoints
+                subset_event_predictions = subset_bkg_event_predictions
+                subset_event_true_labels = subset_bkg_event_true_labels
 
-                min_x = min(non_true_cosmic_spacepoints[:, 2])
-                max_x = max(non_true_cosmic_spacepoints[:, 2])
-                min_y = min(non_true_cosmic_spacepoints[:, 0])
-                max_y = max(non_true_cosmic_spacepoints[:, 0])
-                x_width = max_x - min_x
-                y_width = max_y - min_y
-                extra_scale_factor = 0.5
-                axs[row, pred_col].set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
-                axs[row, pred_col].set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
-                axs[row, true_col].set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
-                axs[row, true_col].set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
+            for i in range(len(subset_point_predictions[subset_event_i])):
+                pred_label = subset_point_predictions[subset_event_i][i]
+                true_label = subset_point_true_labels[subset_event_i][i]
 
-                axs[row, pred_col].text(0.95, 0.05, f"Pred Signal Prob: {eight_events_pred_signal_probs[event_i]:.2f}", transform=axs[row, pred_col].transAxes, ha='right', va='bottom')
-                axs[row, true_col].text(0.95, 0.05, f"True Signal: {eight_events_true_signal[event_i]}", transform=axs[row, true_col].transAxes, ha='right', va='bottom')
+                if pred_label == 0:
+                    pred_colors.append('green')
+                elif pred_label == 1:
+                    pred_colors.append('lightgreen')
+                elif pred_label == 2:
+                    pred_colors.append('brown')
+                else:
+                    pred_colors.append('blue')
 
-            spacepoint_fig.tight_layout()
-            
+                if true_label == 0:
+                    true_colors.append('green')
+                elif true_label == 1:
+                    true_colors.append('lightgreen')
+                elif true_label == 2:
+                    true_colors.append('brown')
+                else:
+                    true_colors.append('blue')
+
+            s = 0.3
+
+            axs[row, pred_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=pred_colors)
+            axs[row, true_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=true_colors)
+
+            axs[row, pred_col].set_xticks([])
+            axs[row, pred_col].set_yticks([])
+            axs[row, true_col].set_xticks([])
+            axs[row, true_col].set_yticks([])
+
+            non_true_cosmic_indices = [i for i in range(len(subset_point_spacepoints[subset_event_i])) if subset_point_true_labels[subset_event_i][i] != 3]
+            non_true_cosmic_spacepoints = np.array([subset_point_spacepoints[subset_event_i][i] for i in non_true_cosmic_indices])
+
+            min_x = min(non_true_cosmic_spacepoints[:, 2])
+            max_x = max(non_true_cosmic_spacepoints[:, 2])
+            min_y = min(non_true_cosmic_spacepoints[:, 0])
+            max_y = max(non_true_cosmic_spacepoints[:, 0])
+            x_width = max_x - min_x
+            y_width = max_y - min_y
+            extra_scale_factor = 0.2
+            axs[row, pred_col].set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
+            axs[row, pred_col].set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
+            axs[row, true_col].set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
+            axs[row, true_col].set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
+
+            axs[row, pred_col].text(0.95, 0.05, f"Pred Signal Prob: {subset_event_predictions[subset_event_i]:.2f}", transform=axs[row, pred_col].transAxes, ha='right', va='bottom', fontsize=8)
+            axs[row, true_col].text(0.95, 0.05, f"True Signal: {subset_event_true_labels[subset_event_i]}", transform=axs[row, true_col].transAxes, ha='right', va='bottom', fontsize=8)
+
+        spacepoint_fig.tight_layout()
+        
+        if args.wandb:
             wandb.log({
                 'epoch': epoch,
                 'train/loss': avg_train_loss,
                 'train/point_accuracy': train_accuracy,
-                'train/global_accuracy': train_global_accuracy,
+                'train/event_accuracy': train_event_accuracy,
                 'test/loss': avg_test_loss,
                 'test/point_accuracy': test_accuracy,
-                'test/global_accuracy': test_global_accuracy,
+                'test/event_accuracy': test_event_accuracy,
                 'learning_rate': optimizer.param_groups[0]['lr'],
-                'test/avg_cosmic_guesses_per_event': avg_cosmic_guesses,
-                'test/avg_gamma1_guesses_per_event': avg_gamma1_guesses,
-                'test/avg_gamma2_guesses_per_event': avg_gamma2_guesses,
-                'test/avg_other_particles_guesses_per_event': avg_other_particles_guesses,
-                'test/confusion_matrix': wandb.Image(confusion_fig),
+                'test/point_confusion_matrix': wandb.Image(point_confusion_fig),
+                'test/event_score_histogram': wandb.Image(event_score_fig),
+                'test/point_category_histogram': wandb.Image(point_category_fig),
                 'test/spacepoint_visualization': wandb.Image(spacepoint_fig),
             })
-            
-            plt.close(confusion_fig)
-            plt.close(spacepoint_fig)
-        else:
-            # Log epoch metrics without extra plots and calculations
-            wandb.log({
-                'epoch': epoch,
-                'train/loss': avg_train_loss,
-                'train/point_accuracy': train_accuracy,
-                'train/global_accuracy': train_global_accuracy,
-                'test/loss': avg_test_loss,
-                'test/point_accuracy': test_accuracy,
-                'test/global_accuracy': test_global_accuracy,
-                'learning_rate': optimizer.param_groups[0]['lr'],
-                'test/avg_cosmic_guesses_per_event': avg_cosmic_guesses,
-                'test/avg_gamma1_guesses_per_event': avg_gamma1_guesses,
-                'test/avg_gamma2_guesses_per_event': avg_gamma2_guesses,
-                'test/avg_other_particles_guesses_per_event': avg_other_particles_guesses,
-            })
+
+        # save point_confusion_fig
+        point_confusion_fig.savefig(f'{args.outdir}/plots/point_confusion_fig.png')
+        event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.png')
+        point_category_fig.savefig(f'{args.outdir}/plots/point_category_fig.png')
+        spacepoint_fig.savefig(f'{args.outdir}/plots/spacepoint_fig.png')
+
+        plt.close(point_confusion_fig)
+        plt.close(event_score_fig)
+        plt.close(point_category_fig)
+        plt.close(spacepoint_fig)
+
+    elif args.wandb: # Log epoch metrics without extra metrics
+        wandb.log({
+            'epoch': epoch,
+            'train/loss': avg_train_loss,
+            'train/point_accuracy': train_accuracy,
+            'train/event_accuracy': train_event_accuracy,
+            'test/loss': avg_test_loss,
+            'test/point_accuracy': test_accuracy,
+            'test/event_accuracy': test_event_accuracy,
+            'learning_rate': optimizer.param_groups[0]['lr'],
+        })
     
-    # Print epoch summary
+    """# Print epoch summary
     print(f'Epoch {epoch+1}/{args.num_epochs}:')
-    print(f'  Train Loss: {avg_train_loss:.4f}, Train Point Acc: {train_accuracy:.2f}%, Train Global Acc: {train_global_accuracy:.2f}%')
-    print(f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test Global Acc: {test_global_accuracy:.2f}%')
+    print(f'  Train Loss: {avg_train_loss:.4f}, Train Point Acc: {train_accuracy:.2f}%, Train event Acc: {train_event_accuracy:.2f}%')
+    print(f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test event Acc: {test_event_accuracy:.2f}%')
     print(f'  Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
     print(f'  Average num cosmic guesses per event: {avg_cosmic_guesses:.2f}')
     print(f'  Average num gamma1 guesses per event: {avg_gamma1_guesses:.2f}')
     print(f'  Average num gamma2 guesses per event: {avg_gamma2_guesses:.2f}')
-    print(f'  Average num other particles guesses per event: {avg_other_particles_guesses:.2f}')
+    print(f'  Average num other particles guesses per event: {avg_other_particles_guesses:.2f}')"""
     
     # Save best model
     if avg_test_loss < best_test_loss and not args.no_save:
@@ -684,6 +702,7 @@ if __name__ == "__main__":
 
     if not args.no_save:
         os.makedirs(args.outdir, exist_ok=True)
+        os.makedirs(f'{args.outdir}/plots', exist_ok=True)
 
     print("Pytorch version: ", torch.__version__)
     if torch.backends.mps.is_available():
@@ -745,7 +764,7 @@ if __name__ == "__main__":
     print(f"Testing batches: {len(test_dataloader)}")
     
     # Get a sample batch to determine input dimensions
-    sample_batch_x, sample_batch_y, sample_batch_global_y = next(iter(train_dataloader))
+    sample_batch_x, sample_batch_y, sample_batch_event_y = next(iter(train_dataloader))
     
     # Determine number of classes from the data
     num_point_classes = 4
@@ -819,8 +838,8 @@ if __name__ == "__main__":
     best_test_loss = test_step(model, test_dataloader, device, -1, args, -1, -1, -1, best_test_loss)
     
     for epoch in range(args.num_epochs):
-        avg_train_loss, train_accuracy, train_global_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args)
-        best_test_loss = test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_global_accuracy, best_test_loss)
+        avg_train_loss, train_accuracy, train_event_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args)
+        best_test_loss = test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_event_accuracy, best_test_loss)
     
     print("Training completed!")
     if not args.no_save:
