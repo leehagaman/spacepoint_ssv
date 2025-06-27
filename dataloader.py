@@ -46,20 +46,27 @@ class SpacepointDataset(Dataset):
         self.real_other_particles_downsampled_spacepoints = outputs[7]
         self.real_cosmic_downsampled_spacepoints = outputs[8]
 
-        # Filter out events with no spacepoints
+        # 0 spacepoints if failed WC generic selection, also potentially could have fewer than 500 spacepoints for a very low-charge image
         total_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_gamma1_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_gamma2_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_other_particles_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_cosmic_downsampled_spacepoints]))
-        for num_spacepoints_in_event in total_num_spacepoints_per_event:
-            assert num_spacepoints_in_event == 0 or num_spacepoints_in_event == 500, f"Event with {num_spacepoints_in_event} spacepoints, expected 0 or 500"
 
-        event_indices_with_spacepoints = np.where(total_num_spacepoints_per_event > 0)[0]
-        self.true_gamma_info_df = self.true_gamma_info_df.iloc[event_indices_with_spacepoints].reset_index(drop=True)
-        self.real_gamma1_downsampled_spacepoints = [self.real_gamma1_downsampled_spacepoints[i] for i in event_indices_with_spacepoints]
-        self.real_gamma2_downsampled_spacepoints = [self.real_gamma2_downsampled_spacepoints[i] for i in event_indices_with_spacepoints]
-        self.real_other_particles_downsampled_spacepoints = [self.real_other_particles_downsampled_spacepoints[i] for i in event_indices_with_spacepoints]
-        self.real_cosmic_downsampled_spacepoints = [self.real_cosmic_downsampled_spacepoints[i] for i in event_indices_with_spacepoints]
+        # Require enough spacepoints in order to use this tool
+        enough_spacepoints_mask = total_num_spacepoints_per_event == 500
+
+        # Require one or two true primary/pi0 gammas pair converting in the final volume
+        sig_mask = self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1
+        bkg_mask = self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 2
+
+        process_mask = enough_spacepoints_mask & (sig_mask | bkg_mask)
+        process_indices = np.where(process_mask)[0]
+
+        self.true_gamma_info_df = self.true_gamma_info_df.iloc[process_indices].reset_index(drop=True)
+        self.real_gamma1_downsampled_spacepoints = [self.real_gamma1_downsampled_spacepoints[i] for i in process_indices]
+        self.real_gamma2_downsampled_spacepoints = [self.real_gamma2_downsampled_spacepoints[i] for i in process_indices]
+        self.real_other_particles_downsampled_spacepoints = [self.real_other_particles_downsampled_spacepoints[i] for i in process_indices]
+        self.real_cosmic_downsampled_spacepoints = [self.real_cosmic_downsampled_spacepoints[i] for i in process_indices]
 
         if self.num_events is None:
             self.num_events = self.true_gamma_info_df.shape[0]

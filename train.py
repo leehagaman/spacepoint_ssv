@@ -20,21 +20,25 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 16})
 from sklearn.metrics import confusion_matrix
 
+import math
+
 def train_step(model, train_dataloader, optimizer, device, epoch, args):
 
     model.train()
-    train_loss = 0.0
-    train_correct = 0
-    train_event_correct = 0
-    train_total = 0
-    train_event_total = 0
+
+    total_train_loss = 0.0
+    total_train_point_loss = 0.0
+    total_train_event_loss = 0.0
+    total_train_correct_points = 0
+    total_train_num_points = 0
+
+    num_train_events = 0
     
     # Track batch-level metrics for wandb
     batch_losses = []
     batch_point_losses = []
     batch_event_losses = []
     batch_point_accuracies = []
-    batch_event_accuracies = []
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
     for batch_idx, (batch_x, batch_y, batch_event_y) in enumerate(train_pbar):
@@ -80,8 +84,10 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         point_loss = losses.get('point_loss', torch.tensor(0.0, device=device))
         event_loss = losses.get('event_loss', torch.tensor(0.0, device=device))
         
-        # Statistics
-        train_loss += total_loss.item()
+        # These are total losses, not average per-event losses
+        total_train_loss += total_loss.item() * B
+        total_train_point_loss += point_loss.item() * B
+        total_train_event_loss += event_loss.item() * B
         
         # Backward pass
         total_loss.backward()
@@ -91,28 +97,19 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         point_features = predictions['point_features']
         point_logits = point_features.feat  # [B*N, num_classes]
         _, predicted = torch.max(point_logits.data, 1)
-        train_total += batch_y_reshaped.size(0)
-        train_correct += (predicted == batch_y_reshaped).sum().item()
-        
-        # Statistics for event predictions
-        if 'event_logits' in predictions:
-            event_logits = predictions['event_logits']  # [B, num_event_classes]
-            event_predicted = torch.argmax(event_logits, dim=1)  # [B]
-            train_event_correct += (event_predicted == batch_event_y_reshaped).sum().item()
-            train_event_total += B
+        total_train_num_points += len(batch_y_reshaped)
+        total_train_correct_points += (predicted == batch_y_reshaped).sum().item()
+
+        num_train_events += B
         
         # Calculate batch-level metrics
         batch_point_accuracy = 100 * (predicted == batch_y_reshaped).sum().item() / batch_y_reshaped.size(0)
-        batch_event_accuracy = 0
-        if 'event_logits' in predictions:
-            batch_event_accuracy = 100 * (event_predicted == batch_event_y_reshaped).sum().item() / B
         
         # Store batch metrics for wandb
         batch_losses.append(total_loss.item())
         batch_point_losses.append(point_loss.item())
         batch_event_losses.append(event_loss.item())
         batch_point_accuracies.append(batch_point_accuracy)
-        batch_event_accuracies.append(batch_event_accuracy)
         
         # Log batch metrics to wandb if enabled
         if args.wandb:
@@ -124,15 +121,12 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
             grad_norm = grad_norm ** 0.5
             
             wandb.log({
-                'train/batch_loss': total_loss.item(),
-                'train/batch_point_loss': point_loss.item(),
-                'train/batch_event_loss': event_loss.item(),
-                'train/batch_point_accuracy': batch_point_accuracy,
-                'train/batch_event_accuracy': batch_event_accuracy,
-                'train/learning_rate': optimizer.param_groups[0]['lr'],
-                'train/gradient_norm': grad_norm,
-                'train/batch': batch_idx,
-                'train/epoch': epoch
+                'train/batch_loss': np.sum(batch_losses) / num_train_events,
+                'train/batch_point_loss': np.mean(batch_point_losses),
+                'train/batch_event_loss': np.mean(batch_event_losses),
+                'train/batch_point_accuracy': np.mean(batch_point_accuracies),
+                'train/batch_gradient_norm': grad_norm,
+                'train/batch_id': batch_idx,
             })
         
         # Update progress bar
@@ -140,25 +134,24 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
             'Loss': f'{total_loss.item():.4f}',
             'Point_Loss': f'{point_loss.item():.4f}',
             'Event_Loss': f'{event_loss.item():.4f}',
-            'Point_Acc': f'{100 * train_correct / train_total:.2f}%',
-            'event_Acc': f'{100 * train_event_correct / train_event_total:.2f}%' if train_event_total > 0 else 'N/A'
         })
-    
-    avg_train_loss = train_loss / len(train_dataloader)
-    train_accuracy = 100 * train_correct / train_total
-    train_event_accuracy = 100 * train_event_correct / train_event_total if train_event_total > 0 else 0
 
-    return avg_train_loss, train_accuracy, train_event_accuracy
+    loss = total_train_loss / num_train_events
+    point_loss = total_train_point_loss / num_train_events
+    event_loss = total_train_event_loss / num_train_events
+    point_accuracy = total_train_correct_points / total_train_num_points
+
+    return loss, point_loss, event_loss, point_accuracy
 
 
-def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_event_accuracy, best_test_loss):
+def test_step(model, test_dataloader, device, epoch, args):
 
     model.eval()
-    test_loss = 0.0
-    test_correct = 0
-    test_correct_event = 0
-    test_total = 0
-    test_event_total = 0
+    total_test_loss = 0.0
+    total_test_point_loss = 0.0
+    total_test_event_loss = 0.0
+    total_test_correct_points = 0
+    total_test_num_points = 0
 
     num_test_events = 0
     
@@ -167,7 +160,6 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
     batch_point_losses = []
     batch_event_losses = []
     batch_point_accuracies = []
-    batch_event_accuracies = []
     
     # For point-level confusion matrix and point category histogram
     all_point_predictions = []
@@ -235,20 +227,17 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             point_loss = losses.get('point_loss', torch.tensor(0.0, device=device))
             event_loss = losses.get('event_loss', torch.tensor(0.0, device=device))
             
-            # Statistics
-            test_loss += total_loss.item()
+            # These are total losses, not average per-event losses
+            total_test_loss += total_loss.item() * B
+            total_test_point_loss += point_loss.item() * B
+            total_test_event_loss += event_loss.item() * B
             
             # Statistics for point-wise predictions
             point_features = predictions['point_features']
             point_logits = point_features.feat  # [B*N, num_classes]
             _, predicted = torch.max(point_logits.data, 1)
-            test_total += batch_y_reshaped.size(0)
-            test_correct += (predicted == batch_y_reshaped).sum().item()
-            
-            event_logits = predictions['event_logits']  # [B, num_event_classes]
-            event_predicted = torch.argmax(event_logits, dim=1)  # [B]
-            test_correct_event += (event_predicted == batch_event_y_reshaped).sum().item()
-            test_event_total += B
+            total_test_num_points += len(batch_y_reshaped)
+            total_test_correct_points += (predicted == batch_y_reshaped).sum().item()
 
             predicted_reshaped = predicted.reshape(B, N)
             predicted_by_event = [predicted_reshaped[i].cpu().numpy() for i in range(B)]
@@ -258,19 +247,19 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             coords = data_dict['coord']
             coords_reshaped = coords.reshape(B, N, C)
             coords_by_event = [coords_reshaped[i].cpu().numpy() for i in range(B)]
+
+            test_correct_points = (predicted == batch_y_reshaped).sum().item()
+            total_test_correct_points += test_correct_points
+            total_test_num_points += len(batch_y_reshaped)
             
             # Calculate batch-level metrics
-            batch_point_accuracy = 100 * (predicted == batch_y_reshaped).sum().item() / batch_y_reshaped.size(0)
-            batch_event_accuracy = 0
-            if 'event_logits' in predictions:
-                batch_event_accuracy = 100 * (event_predicted == batch_event_y_reshaped).sum().item() / B
+            batch_point_accuracy = 100 * test_correct_points / len(batch_y_reshaped)
             
             # Store batch metrics for wandb
             batch_losses.append(total_loss.item())
             batch_point_losses.append(point_loss.item())
             batch_event_losses.append(event_loss.item())
             batch_point_accuracies.append(batch_point_accuracy)
-            batch_event_accuracies.append(batch_event_accuracy)
             
             # Log batch metrics to wandb if enabled
             if args.wandb:
@@ -279,17 +268,15 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
                     'test/batch_point_loss': point_loss.item(),
                     'test/batch_event_loss': event_loss.item(),
                     'test/batch_point_accuracy': batch_point_accuracy,
-                    'test/batch_event_accuracy': batch_event_accuracy,
                     'test/batch': batch_idx,
-                    'test/epoch': epoch
                 })
             
             # Save variables to create extra metrics occasionally
-            if (True or args.wandb) and (epoch % 5 == 0 or epoch == args.num_epochs - 1):
+            if epoch == -1 or epoch % 5 == 0 or epoch == args.num_epochs - 1:
                 all_point_predictions.extend(predicted_by_event)
                 all_point_true_labels.extend(true_labels_by_event)
 
-                event_probs = torch.softmax(event_logits, dim=1)[:, 1].cpu().numpy()
+                event_probs = torch.softmax(predictions['event_logits'], dim=1)[:, 1].cpu().numpy()
                 all_event_probs.extend(event_probs)
                 all_event_true_labels.extend(batch_event_y_reshaped.cpu().numpy())
 
@@ -312,19 +299,19 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
                 'Loss': f'{total_loss.item():.4f}',
                 'Point_Loss': f'{point_loss.item():.4f}',
                 'Event_Loss': f'{event_loss.item():.4f}',
-                'Point Acc': f'{100 * test_correct / test_total:.2f}%',
-                'event Acc': f'{100 * test_correct_event / test_event_total:.2f}%' if test_event_total > 0 else 'N/A'
             })
     
-    avg_test_loss = test_loss / len(test_dataloader)
-    test_accuracy = 100 * test_correct / test_total
-    test_event_accuracy = 100 * test_correct_event / test_event_total if test_event_total > 0 else 0
+    avg_test_loss = total_test_loss / num_test_events
+    avg_test_point_loss = total_test_point_loss / num_test_events
+    avg_test_event_loss = total_test_event_loss / num_test_events
+    avg_test_point_accuracy = 100 * total_test_correct_points / total_test_num_points
     
-    # Learning rate scheduling
-    scheduler.step(avg_test_loss)
-    
-    # Log epoch metrics to wandb if enabled
-    if (True or args.wandb) and (epoch % 5 == 0 or epoch == args.num_epochs - 1):
+    # Create extra test plots
+    if epoch == -1 or epoch % 5 == 0 or epoch == args.num_epochs - 1:
+
+        print("Creating extra test plots")
+        
+        plt.rcParams['figure.dpi'] = 600
         
         # flatten all_point_true_labels and all_point_predictions, so points from all events are together
         flattened_all_point_true_labels = []
@@ -361,54 +348,101 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
 
 
         # Create event score histogram
-        true_signal_probs = all_event_probs[all_event_true_labels == 1]
-        true_background_probs = all_event_probs[all_event_true_labels == 0]
+        true_signal_probs = np.array(all_event_probs)[np.array(all_event_true_labels) == 1]
+        true_background_probs = np.array(all_event_probs)[np.array(all_event_true_labels) == 0]
         bins = np.linspace(0, 1, 51)
         lw = 2
 
         event_score_fig, event_score_ax = plt.subplots(figsize=(8, 6))
-        event_score_ax.hist(true_signal_probs, bins=bins, histtype='step', label='True Signal', density=True, linewidth=lw)
-        event_score_ax.hist(true_background_probs, bins=bins, histtype='step', label='True Background', density=True, linewidth=lw)
+        event_score_ax.hist(true_signal_probs, bins=bins, histtype='step', label='True Signal', linewidth=lw, density=True)
+        event_score_ax.hist(true_background_probs, bins=bins, histtype='step', label='True Background', linewidth=lw, density=True)
         event_score_ax.legend()
         event_score_ax.set_xlabel('Output Signal Score')
         event_score_ax.set_ylabel('Relative Number of Events')
         event_score_fig.tight_layout()
 
+        # create efficiency curve and AUC curve
+        all_signal_plus_background_probs = np.concatenate([true_signal_probs, true_background_probs])
+        quantiles = np.quantile(all_signal_plus_background_probs, np.linspace(0, 1, 1000))
+        total_signal_events = len(true_signal_probs)
+        total_background_events = len(true_background_probs)
+        signal_efficiencies = []
+        background_rejections = []
+        for cut in quantiles:
+            signal_probs_above_cut = true_signal_probs[true_signal_probs > cut]
+            background_probs_above_cut = true_background_probs[true_background_probs > cut]
+            signal_efficiency = len(signal_probs_above_cut) / total_signal_events
+            background_rejection = 1 - len(background_probs_above_cut) / total_background_events
+            signal_efficiencies.append(signal_efficiency)
+            background_rejections.append(background_rejection)
 
+        efficiency_fig, efficiency_ax = plt.subplots(figsize=(8, 6))
+        efficiency_ax.plot(quantiles, signal_efficiencies, label='Signal Efficiency')
+        efficiency_ax.plot(quantiles, background_rejections, label='Background Rejection')
+        efficiency_ax.legend()
+        efficiency_ax.set_xlabel('Output Signal Score Cut')
+        efficiency_ax.set_xlim(0, 1)
+        efficiency_ax.set_ylim(0, 1)
+        efficiency_fig.tight_layout()
+
+        auc = 0
+        for i in range(len(signal_efficiencies) - 1):
+            x_width = -(signal_efficiencies[i + 1] - signal_efficiencies[i])
+            y_height = (background_rejections[i + 1] + background_rejections[i]) / 2
+            auc += x_width * y_height
+
+        auc_fig, auc_ax = plt.subplots(figsize=(8, 6))
+        auc_ax.plot(signal_efficiencies, background_rejections)
+        auc_ax.set_xlabel('Signal Efficiency')
+        auc_ax.set_ylabel('Background Rejection')
+        auc_ax.set_title(f"AUC: {auc:.3f}")
+        auc_ax.set_xlim(0, 1)
+        auc_ax.set_ylim(0, 1)
+        auc_fig.tight_layout()
+        
+        
         # Create point category histogram
+        true_gamma1_counts_by_event = []
+        true_gamma2_counts_by_event = []
+        true_other_counts_by_event = []
+        true_cosmic_counts_by_event = []
+        predicted_gamma1_counts_by_event = []
+        predicted_gamma2_counts_by_event = []
+        predicted_other_counts_by_event = []
+        predicted_cosmic_counts_by_event = []
+        for event_i in range(len(all_point_true_labels)):
+            true_gamma1_counts_by_event.append(np.sum(all_point_true_labels[event_i] == 0))
+            true_gamma2_counts_by_event.append(np.sum(all_point_true_labels[event_i] == 1))
+            true_other_counts_by_event.append(np.sum(all_point_true_labels[event_i] == 2))
+            true_cosmic_counts_by_event.append(np.sum(all_point_true_labels[event_i] == 3))
 
-        true_gamma1_counts_by_event = [np.sum(true_labels_by_event[i] == 0) for i in range(len(true_labels_by_event))]
-        true_gamma2_counts_by_event = [np.sum(true_labels_by_event[i] == 1) for i in range(len(true_labels_by_event))]
-        true_other_counts_by_event = [np.sum(true_labels_by_event[i] == 2) for i in range(len(true_labels_by_event))]
-        true_cosmic_counts_by_event = [np.sum(true_labels_by_event[i] == 3) for i in range(len(true_labels_by_event))]
+            predicted_gamma1_counts_by_event.append(np.sum(all_point_predictions[event_i] == 0))
+            predicted_gamma2_counts_by_event.append(np.sum(all_point_predictions[event_i] == 1))
+            predicted_other_counts_by_event.append(np.sum(all_point_predictions[event_i] == 2))
+            predicted_cosmic_counts_by_event.append(np.sum(all_point_predictions[event_i] == 3))
 
-        predicted_gamma1_counts_by_event = [np.sum(predicted_by_event[i] == 0) for i in range(len(predicted_by_event))]
-        predicted_gamma2_counts_by_event = [np.sum(predicted_by_event[i] == 1) for i in range(len(predicted_by_event))]
-        predicted_other_counts_by_event = [np.sum(predicted_by_event[i] == 2) for i in range(len(predicted_by_event))]
-        predicted_cosmic_counts_by_event = [np.sum(predicted_by_event[i] == 3) for i in range(len(predicted_by_event))]
-
-        bins = np.linspace(0, 500, 51)
+        bins = np.linspace(0, 500, 26)
 
         point_category_fig, point_category_ax = plt.subplots(figsize=(8, 6))
 
         lw = 2
 
-        point_category_ax.hist(predicted_gamma1_counts_by_event, bins=bins, histtype='step', label='Gamma1', density=True, color="C0", linewidth=lw)
-        point_category_ax.hist(predicted_gamma2_counts_by_event, bins=bins, histtype='step', label='Gamma2', density=True, color="C1", linewidth=lw)
-        point_category_ax.hist(predicted_other_counts_by_event, bins=bins, histtype='step', label='Other', density=True, color="C2", linewidth=lw)
-        point_category_ax.hist(predicted_cosmic_counts_by_event, bins=bins, histtype='step', label='Cosmic', density=True, color="C3", linewidth=lw)
+        point_category_ax.hist(predicted_gamma1_counts_by_event, bins=bins, histtype='step', label='Gamma1', color="C0", linewidth=lw, density=True)
+        point_category_ax.hist(predicted_gamma2_counts_by_event, bins=bins, histtype='step', label='Gamma2', color="C1", linewidth=lw, density=True)
+        point_category_ax.hist(predicted_other_counts_by_event, bins=bins, histtype='step', label='Other', color="C2", linewidth=lw, density=True)
+        point_category_ax.hist(predicted_cosmic_counts_by_event, bins=bins, histtype='step', label='Cosmic', color="C3", linewidth=lw, density=True)
         
-        point_category_ax.hist(true_gamma1_counts_by_event, bins=bins, histtype='step', density=True, color="C0", linestyle="--", linewidth=lw)
-        point_category_ax.hist(true_gamma2_counts_by_event, bins=bins, histtype='step', density=True, color="C1", linestyle="--", linewidth=lw)
-        point_category_ax.hist(true_other_counts_by_event, bins=bins, histtype='step', density=True, color="C2", linestyle="--", linewidth=lw)
-        point_category_ax.hist(true_cosmic_counts_by_event, bins=bins, histtype='step', density=True, color="C3", linestyle="--", linewidth=lw)
+        point_category_ax.hist(true_gamma1_counts_by_event, bins=bins, histtype='step', color="C0", linestyle="--", linewidth=lw, density=True)
+        point_category_ax.hist(true_gamma2_counts_by_event, bins=bins, histtype='step', color="C1", linestyle="--", linewidth=lw, density=True)
+        point_category_ax.hist(true_other_counts_by_event, bins=bins, histtype='step', color="C2", linestyle="--", linewidth=lw, density=True)
+        point_category_ax.hist(true_cosmic_counts_by_event, bins=bins, histtype='step', color="C3", linestyle="--", linewidth=lw, density=True)
 
         point_category_ax.plot([], [], c="k", label="Predicted Category", linestyle="-", linewidth=lw)
         point_category_ax.plot([], [], c="k", label="True Category", linestyle="--", linewidth=lw)
         point_category_ax.legend()
 
         point_category_ax.set_xlabel('Number of Points in Event')
-        point_category_ax.set_ylabel('Relative Number Events')
+        point_category_ax.set_ylabel('Relative Number of Events')
         point_category_fig.tight_layout()
 
 
@@ -461,7 +495,7 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
                 else:
                     true_colors.append('blue')
 
-            s = 0.3
+            s = 0.15
 
             axs[row, pred_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=pred_colors)
             axs[row, true_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=true_colors)
@@ -474,10 +508,17 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             non_true_cosmic_indices = [i for i in range(len(subset_point_spacepoints[subset_event_i])) if subset_point_true_labels[subset_event_i][i] != 3]
             non_true_cosmic_spacepoints = np.array([subset_point_spacepoints[subset_event_i][i] for i in non_true_cosmic_indices])
 
-            min_x = min(non_true_cosmic_spacepoints[:, 2])
-            max_x = max(non_true_cosmic_spacepoints[:, 2])
-            min_y = min(non_true_cosmic_spacepoints[:, 0])
-            max_y = max(non_true_cosmic_spacepoints[:, 0])
+            if len(non_true_cosmic_spacepoints) > 0:
+                min_x = min(non_true_cosmic_spacepoints[:, 2])
+                max_x = max(non_true_cosmic_spacepoints[:, 2])
+                min_y = min(non_true_cosmic_spacepoints[:, 0])
+                max_y = max(non_true_cosmic_spacepoints[:, 0])
+            else:
+                # no reco spacepoints around the true spacepoints, so just use the cosmic reco spacepoints to set the range
+                min_x = min(subset_point_spacepoints[subset_event_i][:, 2])
+                max_x = max(subset_point_spacepoints[subset_event_i][:, 2])
+                min_y = min(subset_point_spacepoints[subset_event_i][:, 0])
+                max_y = max(subset_point_spacepoints[subset_event_i][:, 0])
             x_width = max_x - min_x
             y_width = max_y - min_y
             extra_scale_factor = 0.2
@@ -489,89 +530,41 @@ def test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train
             axs[row, pred_col].text(0.95, 0.05, f"Pred Signal Prob: {subset_event_predictions[subset_event_i]:.2f}", transform=axs[row, pred_col].transAxes, ha='right', va='bottom', fontsize=8)
             axs[row, true_col].text(0.95, 0.05, f"True Signal: {subset_event_true_labels[subset_event_i]}", transform=axs[row, true_col].transAxes, ha='right', va='bottom', fontsize=8)
 
+            if len(non_true_cosmic_spacepoints) == 0:
+                axs[row, true_col].text(0.8, 0.3, "No reco spacepoints\ncorresponding to \ntrue neutrino EDeps", transform=axs[row, true_col].transAxes, ha='center', va='center', fontsize=4)
+
         spacepoint_fig.tight_layout()
         
         if args.wandb:
             wandb.log({
-                'epoch': epoch,
-                'train/loss': avg_train_loss,
-                'train/point_accuracy': train_accuracy,
-                'train/event_accuracy': train_event_accuracy,
-                'test/loss': avg_test_loss,
-                'test/point_accuracy': test_accuracy,
-                'test/event_accuracy': test_event_accuracy,
-                'learning_rate': optimizer.param_groups[0]['lr'],
                 'test/point_confusion_matrix': wandb.Image(point_confusion_fig),
                 'test/event_score_histogram': wandb.Image(event_score_fig),
                 'test/point_category_histogram': wandb.Image(point_category_fig),
                 'test/spacepoint_visualization': wandb.Image(spacepoint_fig),
+                'test/efficiency_curve': wandb.Image(efficiency_fig),
+                'test/auc_curve': wandb.Image(auc_fig),
             })
 
-        # save point_confusion_fig
-        point_confusion_fig.savefig(f'{args.outdir}/plots/point_confusion_fig.png')
-        event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.png')
-        point_category_fig.savefig(f'{args.outdir}/plots/point_category_fig.png')
-        spacepoint_fig.savefig(f'{args.outdir}/plots/spacepoint_fig.png')
+        point_confusion_fig.savefig(f'{args.outdir}/plots/point_confusion_fig.jpg', dpi=300)
+        event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.jpg', dpi=300)
+        point_category_fig.savefig(f'{args.outdir}/plots/point_category_fig.jpg', dpi=300)
+        spacepoint_fig.savefig(f'{args.outdir}/plots/spacepoint_fig.jpg', dpi=600)
+        efficiency_fig.savefig(f'{args.outdir}/plots/efficiency_fig.jpg', dpi=300)
+        auc_fig.savefig(f'{args.outdir}/plots/auc_fig.jpg', dpi=300)
 
         plt.close(point_confusion_fig)
         plt.close(event_score_fig)
         plt.close(point_category_fig)
         plt.close(spacepoint_fig)
+        plt.close(efficiency_fig)
+        plt.close(auc_fig)
 
-    elif args.wandb: # Log epoch metrics without extra metrics
-        wandb.log({
-            'epoch': epoch,
-            'train/loss': avg_train_loss,
-            'train/point_accuracy': train_accuracy,
-            'train/event_accuracy': train_event_accuracy,
-            'test/loss': avg_test_loss,
-            'test/point_accuracy': test_accuracy,
-            'test/event_accuracy': test_event_accuracy,
-            'learning_rate': optimizer.param_groups[0]['lr'],
-        })
+    loss = total_test_loss / num_test_events
+    point_loss = total_test_point_loss / num_test_events
+    event_loss = total_test_event_loss / num_test_events
+    point_accuracy = total_test_correct_points / total_test_num_points
     
-    """# Print epoch summary
-    print(f'Epoch {epoch+1}/{args.num_epochs}:')
-    print(f'  Train Loss: {avg_train_loss:.4f}, Train Point Acc: {train_accuracy:.2f}%, Train event Acc: {train_event_accuracy:.2f}%')
-    print(f'  Test Loss: {avg_test_loss:.4f}, Test Point Acc: {test_accuracy:.2f}%, Test event Acc: {test_event_accuracy:.2f}%')
-    print(f'  Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
-    print(f'  Average num cosmic guesses per event: {avg_cosmic_guesses:.2f}')
-    print(f'  Average num gamma1 guesses per event: {avg_gamma1_guesses:.2f}')
-    print(f'  Average num gamma2 guesses per event: {avg_gamma2_guesses:.2f}')
-    print(f'  Average num other particles guesses per event: {avg_other_particles_guesses:.2f}')"""
-    
-    # Save best model
-    if avg_test_loss < best_test_loss and not args.no_save:
-        best_test_loss = avg_test_loss
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': avg_train_loss,
-            'test_loss': avg_test_loss,
-            'train_accuracy': train_accuracy,
-            'test_accuracy': test_accuracy,
-        }, f'{args.outdir}/best_model.pth')
-        print(f'  Saved best model with test loss: {best_test_loss:.4f}')
-    
-    # Save checkpoint every 10 epochs
-    if (epoch + 1) % 10 == 0 and not args.no_save:
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': avg_train_loss,
-            'test_loss': avg_test_loss,
-            'train_accuracy': train_accuracy,
-            'test_accuracy': test_accuracy,
-        }, f'{args.outdir}/checkpoint_epoch_{epoch+1}.pth')
-        print(f'  Saved checkpoint to {args.outdir}/checkpoint_epoch_{epoch+1}.pth')
-        
-        # Log checkpoint to wandb if enabled
-        if args.wandb:
-            wandb.save(f'{args.outdir}/checkpoint_epoch_{epoch+1}.pth')
-    
-    return best_test_loss
+    return loss, point_loss, event_loss, point_accuracy
 
 
 def create_parameter_log(args, model, device, train_dataloader, test_dataloader, start_time):
@@ -631,11 +624,11 @@ def create_parameter_log(args, model, device, train_dataloader, test_dataloader,
     log_content.append("TRAINING CONFIGURATION")
     log_content.append("-" * 40)
     log_content.append(f"Number of epochs: {args.num_epochs}")
-    log_content.append(f"Learning rate: 0.001")
+    log_content.append(f"Learning rate: {args.learning_rate}")
     log_content.append(f"Weight decay: 1e-4")
-    log_content.append(f"Scheduler factor: 0.5")
-    log_content.append(f"Scheduler patience: 5")
-    log_content.append(f"Compile mode: {args.compile}")
+    log_content.append(f"Scheduler: CosineAnnealingLR")
+    log_content.append(f"T_max: {args.num_epochs}")
+    log_content.append(f"eta_min: 0.0001")
     log_content.append("")
     
     # Model Architecture Details
@@ -665,6 +658,8 @@ def create_parameter_log(args, model, device, train_dataloader, test_dataloader,
         log_content.append(f"Run name: {args.wandb_run_name}")
         log_content.append(f"Run URL: {wandb.run.get_url()}")
         log_content.append("")
+        log_content.append("All parameters are also logged in wandb config for easy access.")
+        log_content.append("")
     
     # Footer
     log_content.append("=" * 80)
@@ -683,13 +678,13 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/downsampled_spacepoints.pkl')
     parser.add_argument('-o', '--outdir', type=str, required=False, help='Path to directory to save logs and checkpoints.', default=f"training_files/{datetime.now().strftime("%Y_%m_%d-%H:%M:%S")}")
     parser.add_argument('-n', '--num_events', type=int, required=False, help='Number of training events to use.')
-    parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.5)
-    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=4)
-    parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=20)
+    parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.75)
+    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=64)
+    parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=50)
     parser.add_argument('-w', '--num_workers', type=int, required=False, help='Number of worker processes for data loading.', default=0)
     parser.add_argument('-ns', '--no_save', action='store_true', required=False, help='Do not save checkpoints.')
     parser.add_argument('-wb', '--wandb', action='store_true', required=False, help='Use wandb to track training.')
-    parser.add_argument('-c', '--compile', type=str, required=False, help='Compile mode for pytorch model.', default="none")
+    parser.add_argument('-lr', '--learning_rate', type=float, required=False, help='Learning rate for training.', default=0.001)
     parser.add_argument('--wandb_project', type=str, required=False, help='Wandb project name.', default='spacepoint-ssv')
     parser.add_argument('--wandb_entity', type=str, required=False, help='Wandb entity/username.', default=None)
     parser.add_argument('--wandb_run_name', type=str, required=False, help='Wandb run name.', default=None)
@@ -718,32 +713,48 @@ if __name__ == "__main__":
     # Initialize wandb if enabled
     if args.wandb:
         
-        # Initialize wandb
+        # Create comprehensive config with all parameter log information
+        config = {
+            # Basic training parameters
+            'file': args.file,
+            'outdir': args.outdir,
+            'num_events': args.num_events,
+            'train_fraction': args.train_fraction,
+            'batch_size': args.batch_size,
+            'num_epochs': args.num_epochs,
+            'num_workers': args.num_workers,
+            
+            # Model configuration
+            'model_type': 'MultiTaskPointTransformerV3',
+            'num_point_classes': 4,
+            'num_event_classes': 2,
+            'learning_rate': 0.001,
+            'weight_decay': 1e-4,
+            'scheduler_type': 'CosineAnnealingLR',
+            'scheduler_t_max': args.num_epochs,
+            'scheduler_eta_min': 0.0001,
+            'grid_size': 0.1,
+            'event_loss_weight': 1.0,
+            
+            # System information
+            'pytorch_version': torch.__version__,
+            'device': str(device),
+            'cuda_available': torch.cuda.is_available(),
+        }
+        
+        # Add CUDA information if available
+        if torch.cuda.is_available():
+            config.update({
+                'cuda_device_name': torch.cuda.get_device_name(0),
+                'cuda_version': torch.version.cuda,
+            })
+        
+        # Initialize wandb with comprehensive config
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.wandb_run_name,
-            config={
-                'file': args.file,
-                'outdir': args.outdir,
-                'num_events': args.num_events,
-                'train_fraction': args.train_fraction,
-                'batch_size': args.batch_size,
-                'num_epochs': args.num_epochs,
-                'num_workers': args.num_workers,
-                'compile_mode': args.compile,
-                'model_type': 'MultiTaskPointTransformerV3',
-                'num_point_classes': 4,
-                'num_event_classes': 2,
-                'learning_rate': 0.001,
-                'weight_decay': 1e-4,
-                'scheduler_factor': 0.5,
-                'scheduler_patience': 5,
-                'grid_size': 0.1,
-                'event_loss_weight': 1.0,
-                'pytorch_version': torch.__version__,
-                'device': str(device),
-            }
+            config=config
         )
         print(f"Initialized wandb run: {wandb.run.name}")
 
@@ -778,15 +789,6 @@ if __name__ == "__main__":
         enable_event_classification=True,  # Disable for now
     )
     model = model.to(device)
-
-    if args.compile == "none":
-        print("Not compiling model")
-    else:
-        print(f"Compiling model for optimized performance with mode {args.compile}...")
-        if args.compile not in ["none", "default", "max-autotune", "max-autotune-no-cudagraphs"]:
-            raise ValueError(f"Invalid compile mode: {args.compile}")
-        model = torch.compile(model, mode=args.compile)
-        print("Model compilation completed")
     
     print(f"created model with {sum(p.numel() for p in model.parameters())} parameters")
     
@@ -794,9 +796,15 @@ if __name__ == "__main__":
     if args.wandb:
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
+        # Update wandb config with model parameters and data information
         wandb.config.update({
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
+            'model_size_mb': total_params * 4 / 1024 / 1024,
+            'training_batches': len(train_dataloader),
+            'testing_batches': len(test_dataloader),
+            'training_start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
         })
         
         # Log model architecture
@@ -806,10 +814,10 @@ if __name__ == "__main__":
     
     # Training setup
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    
-    # Training parameters
-    best_test_loss = float('inf')
+
+    # Cosine Annealing Scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=0.0001)
+    print(f"Using CosineAnnealingLR scheduler with T_max={args.num_epochs}, eta_min=0.0001")
 
     # Create training log
     parameter_log = create_parameter_log(args, model, device, train_dataloader, test_dataloader, start_time)
@@ -821,7 +829,7 @@ if __name__ == "__main__":
     print(f"Parameter log saved to: {log_file_path}")
 
     # Upload training log to wandb if enabled
-    if args.wandb:
+    """if args.wandb:
         artifact = wandb.Artifact(
             name=f"parameters-{wandb.run.name}",
             type="parameters",
@@ -830,17 +838,55 @@ if __name__ == "__main__":
         artifact.add_file(log_file_path)
         wandb.log_artifact(artifact)
         print("Training log uploaded to wandb as artifact")
+    """
     
     # Training loop
     print(f"Starting training for {args.num_epochs} epochs...")
 
-    print("First, a test step with random initialization")
-    best_test_loss = test_step(model, test_dataloader, device, -1, args, -1, -1, -1, best_test_loss)
+    best_test_loss = float('inf')
     
-    for epoch in range(args.num_epochs):
-        avg_train_loss, train_accuracy, train_event_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args)
-        best_test_loss = test_step(model, test_dataloader, device, epoch, args, avg_train_loss, train_accuracy, train_event_accuracy, best_test_loss)
-    
+    for epoch in range(-1, args.num_epochs):
+
+        if epoch == -1: # testing the random network before any training
+            test_loss, test_point_loss, test_event_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
+            # train and test should be the same for the inital random network before any training happens
+            train_loss, train_point_loss, train_event_loss, train_point_accuracy = test_loss, test_point_loss, test_event_loss, test_point_accuracy
+        else:
+            train_loss, train_point_loss, train_event_loss, train_point_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args)
+            test_loss, test_point_loss, test_event_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
+
+        if test_loss < best_test_loss: # save the best model
+            best_test_loss = test_loss
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'test_loss': test_loss,
+            }, f'{args.outdir}/best_model.pth')
+
+        if (epoch + 1) % 10 == 0: # save a checkpoint of the model
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'test_loss': test_loss,
+            }, f'{args.outdir}/checkpoint_epoch_{epoch+1}.pth')
+
+        wandb.log({
+            'epoch': epoch,
+            'learning_rate': optimizer.param_groups[0]['lr'],
+            'train/loss': train_loss,
+            'train/point_loss': train_point_loss,
+            'train/event_loss': train_event_loss,
+            'train/point_accuracy': train_point_accuracy,
+            'test/loss': test_loss,
+            'test/point_loss': test_point_loss,
+            'test/event_loss': test_event_loss,
+            'test/point_accuracy': test_point_accuracy,
+        })
+
+        scheduler.step()
+            
     print("Training completed!")
     if not args.no_save:
         print(f"Best model saved to: {args.outdir}/best_model.pth")
