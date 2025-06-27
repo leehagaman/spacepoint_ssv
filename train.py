@@ -11,16 +11,17 @@ import numpy as np
 import torch 
 import os
 from datetime import datetime
+import math
+import json
+import wandb
+
 from dataloader import create_dataloaders
 from models.my_PointTransformer_model import MultiTaskPointTransformerV3
-
-import wandb
 
 import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 16})
 from sklearn.metrics import confusion_matrix
 
-import math
 
 def train_step(model, train_dataloader, optimizer, device, epoch, args):
 
@@ -41,30 +42,29 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
     batch_point_accuracies = []
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
-    for batch_idx, (batch_x, batch_y, batch_event_y) in enumerate(train_pbar):
-        # batch_x has shape (B, 3, 500) where B is batch size (number of events)
-        # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
-        batch_x = batch_x.to(device)
-        batch_y = batch_y.to(device)
+    for batch_idx, (batch_coords, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(train_pbar):
+        # batch_coords has shape (total_points, 3) - all points from all events concatenated
+        # batch_labels has shape (total_points,) - all labels concatenated
+        # batch_event_y has shape (batch_size,) - event-level labels
+        # batch_indices has shape (total_points,) - batch index for each point
+        # batch_pair_conversion_coords is a list of lists of [x, y, z] coordinates for each event in batch
+        batch_coords = batch_coords.to(device)
+        batch_labels = batch_labels.to(device)
         batch_event_y = batch_event_y.to(device)
+        batch_indices = batch_indices.to(device)
         
-        # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
-        B, C, N = batch_x.shape
-        batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
-        batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
-        batch_event_y_reshaped = batch_event_y.reshape(B)  # Shape: (B,)
+        B = batch_event_y.size(0)  # Number of events in this batch
         
         optimizer.zero_grad()
         
         # Prepare data for MultiTaskPointTransformerV3
-        coord = batch_x_reshaped.contiguous()  # [B*N, 3] - make contiguous
-        batch_idx_tensor = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
+        coord = batch_coords.contiguous()  # [total_points, 3] - make contiguous
         
         data_dict = {
             'coord': coord,
             'feat': coord,  # Use coordinates as initial features
-            'grid_size': torch.tensor(0.1, device=device),  # Increased from 0.01 to 0.1
-            'batch': batch_idx_tensor
+            'grid_size': torch.tensor(args.model_settings['grid_size'], device=device),
+            'batch': batch_indices  # [total_points] - tells model which points belong to which event
         }
         
         # Forward pass
@@ -72,8 +72,8 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         
         # Prepare targets for loss computation
         targets = {
-            'point_labels': batch_y_reshaped,
-            'event_labels': batch_event_y_reshaped
+            'point_labels': batch_labels,
+            'event_labels': batch_event_y
         }
         
         # Compute loss using model's compute_loss method
@@ -95,15 +95,16 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         
         # Statistics for point-wise predictions
         point_features = predictions['point_features']
-        point_logits = point_features.feat  # [B*N, num_classes]
+        point_logits = point_features.feat  # [total_points, num_classes]
         _, predicted = torch.max(point_logits.data, 1)
-        total_train_num_points += len(batch_y_reshaped)
-        total_train_correct_points += (predicted == batch_y_reshaped).sum().item()
+        
+        total_train_num_points += batch_labels.size(0)
+        total_train_correct_points += (predicted == batch_labels).sum().item()
 
         num_train_events += B
         
         # Calculate batch-level metrics
-        batch_point_accuracy = 100 * (predicted == batch_y_reshaped).sum().item() / batch_y_reshaped.size(0)
+        batch_point_accuracy = 100 * (predicted == batch_labels).sum().item() / batch_labels.size(0)
         
         # Store batch metrics for wandb
         batch_losses.append(total_loss.item())
@@ -176,38 +177,38 @@ def test_step(model, test_dataloader, device, epoch, args):
     subset_sig_spacepoints = []
     subset_sig_event_predictions = []
     subset_sig_event_true_labels = []
+    subset_sig_pair_conversion_coords = []
     subset_bkg_point_predictions = []
     subset_bkg_point_true_labels = []
     subset_bkg_spacepoints = []
     subset_bkg_event_predictions = []
     subset_bkg_event_true_labels = []
+    subset_bkg_pair_conversion_coords = []
 
     with torch.no_grad():
         test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
-        for batch_idx, (batch_x, batch_y, batch_event_y) in enumerate(test_pbar):
-            # batch_x has shape (B, 3, 500) where B is batch size (number of events)
-            # batch_y has shape (B, 500) where each row contains labels for 500 spacepoints
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
+        for batch_idx, (batch_coords, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(test_pbar):
+            # batch_coords has shape (total_points, 3) - all points from all events concatenated
+            # batch_labels has shape (total_points,) - all labels concatenated
+            # batch_event_y has shape (batch_size,) - event-level labels
+            # batch_indices has shape (total_points,) - batch index for each point
+            # batch_pair_conversion_coords is a list of lists of [x, y, z] coordinates for each event in batch
+            batch_coords = batch_coords.to(device)
+            batch_labels = batch_labels.to(device)
             batch_event_y = batch_event_y.to(device)
+            batch_indices = batch_indices.to(device)
 
-            B, C, N = batch_x.shape
+            B = batch_event_y.size(0)  # Number of events in this batch
             num_test_events += B
             
-            # Reshape for model input: (B, 3, 500) -> (B*500, 3) for loss calculation
-            batch_x_reshaped = batch_x.transpose(1, 2).reshape(B*N, C)  # Shape: (B*500, 3)
-            batch_y_reshaped = batch_y.reshape(B*N)  # Shape: (B*500,)
-            batch_event_y_reshaped = batch_event_y.reshape(B)  # Shape: (B,)
-            
             # Prepare data for MultiTaskPointTransformerV3
-            coord = batch_x_reshaped.contiguous()  # [B*N, 3] - make contiguous
-            batch_idx_tensor = torch.arange(B, device=device).repeat_interleave(N)  # [B*N]
+            coord = batch_coords.contiguous()  # [total_points, 3] - make contiguous
             
             data_dict = {
                 'coord': coord,
                 'feat': coord,  # Use coordinates as initial features
-                'grid_size': torch.tensor(0.1, device=device),  # Increased from 0.01 to 0.1
-                'batch': batch_idx_tensor
+                'grid_size': torch.tensor(args.model_settings['grid_size'], device=device),
+                'batch': batch_indices  # [total_points] - tells model which points belong to which event
             }
             
             # Forward pass
@@ -215,8 +216,8 @@ def test_step(model, test_dataloader, device, epoch, args):
             
             # Prepare targets for loss computation
             targets = {
-                'point_labels': batch_y_reshaped,
-                'event_labels': batch_event_y_reshaped
+                'point_labels': batch_labels,
+                'event_labels': batch_event_y
             }
             
             # Compute loss using model's compute_loss method
@@ -234,26 +235,29 @@ def test_step(model, test_dataloader, device, epoch, args):
             
             # Statistics for point-wise predictions
             point_features = predictions['point_features']
-            point_logits = point_features.feat  # [B*N, num_classes]
+            point_logits = point_features.feat  # [total_points, num_classes]
             _, predicted = torch.max(point_logits.data, 1)
-            total_test_num_points += len(batch_y_reshaped)
-            total_test_correct_points += (predicted == batch_y_reshaped).sum().item()
+            
+            total_test_num_points += batch_labels.size(0)
+            total_test_correct_points += (predicted == batch_labels).sum().item()
 
-            predicted_reshaped = predicted.reshape(B, N)
-            predicted_by_event = [predicted_reshaped[i].cpu().numpy() for i in range(B)]
-            true_labels_reshaped = batch_y_reshaped.reshape(B, N)
-            true_labels_by_event = [true_labels_reshaped[i].cpu().numpy() for i in range(B)]
-
-            coords = data_dict['coord']
-            coords_reshaped = coords.reshape(B, N, C)
-            coords_by_event = [coords_reshaped[i].cpu().numpy() for i in range(B)]
-
-            test_correct_points = (predicted == batch_y_reshaped).sum().item()
-            total_test_correct_points += test_correct_points
-            total_test_num_points += len(batch_y_reshaped)
+            # For visualization, separate predictions and labels by event
+            predicted_by_event = []
+            true_labels_by_event = []
+            coords_by_event = []
+            
+            for i in range(B):
+                event_mask = (batch_indices == i)
+                event_pred = predicted[event_mask].cpu().numpy()
+                event_true = batch_labels[event_mask].cpu().numpy()
+                event_coords = batch_coords[event_mask].cpu().numpy()
+                
+                predicted_by_event.append(event_pred)
+                true_labels_by_event.append(event_true)
+                coords_by_event.append(event_coords)
             
             # Calculate batch-level metrics
-            batch_point_accuracy = 100 * test_correct_points / len(batch_y_reshaped)
+            batch_point_accuracy = 100 * (predicted == batch_labels).sum().item() / batch_labels.size(0)
             
             # Store batch metrics for wandb
             batch_losses.append(total_loss.item())
@@ -278,23 +282,24 @@ def test_step(model, test_dataloader, device, epoch, args):
 
                 event_probs = torch.softmax(predictions['event_logits'], dim=1)[:, 1].cpu().numpy()
                 all_event_probs.extend(event_probs)
-                all_event_true_labels.extend(batch_event_y_reshaped.cpu().numpy())
+                all_event_true_labels.extend(batch_event_y.cpu().numpy())
 
                 for event_i in range(B):
-                    if len(subset_sig_point_predictions) < num_spacepoint_plot_events and batch_event_y_reshaped[event_i] == 1:
+                    if len(subset_sig_point_predictions) < num_spacepoint_plot_events and batch_event_y[event_i] == 1:
                         subset_sig_point_predictions.append(predicted_by_event[event_i])
                         subset_sig_point_true_labels.append(true_labels_by_event[event_i])
                         subset_sig_spacepoints.append(coords_by_event[event_i])
                         subset_sig_event_predictions.append(event_probs[event_i])
-                        subset_sig_event_true_labels.append(batch_event_y_reshaped[event_i])
-                    elif len(subset_bkg_point_predictions) < num_spacepoint_plot_events and batch_event_y_reshaped[event_i] == 0:
+                        subset_sig_event_true_labels.append(batch_event_y[event_i])
+                        subset_sig_pair_conversion_coords.append(batch_pair_conversion_coords[event_i])
+                    elif len(subset_bkg_point_predictions) < num_spacepoint_plot_events and batch_event_y[event_i] == 0:
                         subset_bkg_point_predictions.append(predicted_by_event[event_i])
                         subset_bkg_point_true_labels.append(true_labels_by_event[event_i])
                         subset_bkg_spacepoints.append(coords_by_event[event_i])
                         subset_bkg_event_predictions.append(event_probs[event_i])
-                        subset_bkg_event_true_labels.append(batch_event_y_reshaped[event_i])
+                        subset_bkg_event_true_labels.append(batch_event_y[event_i])
+                        subset_bkg_pair_conversion_coords.append(batch_pair_conversion_coords[event_i])
             
-            # Update progress bar
             test_pbar.set_postfix({
                 'Loss': f'{total_loss.item():.4f}',
                 'Point_Loss': f'{point_loss.item():.4f}',
@@ -368,18 +373,27 @@ def test_step(model, test_dataloader, device, epoch, args):
         total_background_events = len(true_background_probs)
         signal_efficiencies = []
         background_rejections = []
+        eff_times_rej = []
         for cut in quantiles:
             signal_probs_above_cut = true_signal_probs[true_signal_probs > cut]
             background_probs_above_cut = true_background_probs[true_background_probs > cut]
-            signal_efficiency = len(signal_probs_above_cut) / total_signal_events
-            background_rejection = 1 - len(background_probs_above_cut) / total_background_events
+            if total_signal_events == 0:
+                signal_efficiency = 0
+            else:
+                signal_efficiency = len(signal_probs_above_cut) / total_signal_events
+            if total_background_events == 0:
+                background_rejection = 0
+            else:
+                background_rejection = 1 - len(background_probs_above_cut) / total_background_events
             signal_efficiencies.append(signal_efficiency)
             background_rejections.append(background_rejection)
+            eff_times_rej.append(signal_efficiency * background_rejection)
 
         efficiency_fig, efficiency_ax = plt.subplots(figsize=(8, 6))
         efficiency_ax.plot(quantiles, signal_efficiencies, label='Signal Efficiency')
         efficiency_ax.plot(quantiles, background_rejections, label='Background Rejection')
-        efficiency_ax.legend()
+        efficiency_ax.plot(quantiles, eff_times_rej, label='Signal Efficiency * Background Rejection')
+        efficiency_ax.legend(loc='upper left', fontsize=12)
         efficiency_ax.set_xlabel('Output Signal Score Cut')
         efficiency_ax.set_xlim(0, 1)
         efficiency_ax.set_ylim(0, 1)
@@ -466,12 +480,17 @@ def test_step(model, test_dataloader, device, epoch, args):
                 subset_point_spacepoints = subset_sig_spacepoints
                 subset_event_predictions = subset_sig_event_predictions
                 subset_event_true_labels = subset_sig_event_true_labels
+                subset_pair_conversion_coords = subset_sig_pair_conversion_coords
             else:
                 subset_point_predictions = subset_bkg_point_predictions
                 subset_point_true_labels = subset_bkg_point_true_labels
                 subset_point_spacepoints = subset_bkg_spacepoints
                 subset_event_predictions = subset_bkg_event_predictions
                 subset_event_true_labels = subset_bkg_event_true_labels
+                subset_pair_conversion_coords = subset_bkg_pair_conversion_coords
+
+            if subset_event_i >= len(subset_point_predictions): # not enough events, don't plot here
+                continue
 
             for i in range(len(subset_point_predictions[subset_event_i])):
                 pred_label = subset_point_predictions[subset_event_i][i]
@@ -499,6 +518,12 @@ def test_step(model, test_dataloader, device, epoch, args):
 
             axs[row, pred_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=pred_colors)
             axs[row, true_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=true_colors)
+            
+            # Plot pair conversion points as red stars
+            for coord in subset_pair_conversion_coords[subset_event_i]:
+                pair_x = [coord[2] for coord in subset_pair_conversion_coords[subset_event_i]]  # z coordinate
+                pair_y = [coord[0] for coord in subset_pair_conversion_coords[subset_event_i]]  # x coordinate
+                axs[row, true_col].scatter(pair_x, pair_y, s=50, c='red', marker='*', edgecolors='black', linewidth=0.5)
 
             axs[row, pred_col].set_xticks([])
             axs[row, pred_col].set_yticks([])
@@ -509,10 +534,11 @@ def test_step(model, test_dataloader, device, epoch, args):
             non_true_cosmic_spacepoints = np.array([subset_point_spacepoints[subset_event_i][i] for i in non_true_cosmic_indices])
 
             if len(non_true_cosmic_spacepoints) > 0:
-                min_x = min(non_true_cosmic_spacepoints[:, 2])
-                max_x = max(non_true_cosmic_spacepoints[:, 2])
-                min_y = min(non_true_cosmic_spacepoints[:, 0])
-                max_y = max(non_true_cosmic_spacepoints[:, 0])
+                all_coords = np.vstack([non_true_cosmic_spacepoints, subset_pair_conversion_coords[subset_event_i]])
+                min_x = min(all_coords[:, 2])
+                max_x = max(all_coords[:, 2])
+                min_y = min(all_coords[:, 0])
+                max_y = max(all_coords[:, 0])
             else:
                 # no reco spacepoints around the true spacepoints, so just use the cosmic reco spacepoints to set the range
                 min_x = min(subset_point_spacepoints[subset_event_i][:, 2])
@@ -567,115 +593,13 @@ def test_step(model, test_dataloader, device, epoch, args):
     return loss, point_loss, event_loss, point_accuracy
 
 
-def create_parameter_log(args, model, device, train_dataloader, test_dataloader, start_time):
-    """
-    Create a comprehensive parameter log file with all arguments, system info, and model details.
-    """
-    log_content = []
-    
-    # Header
-    log_content.append("=" * 80)
-    log_content.append("SPACEPOINT SSV TRAINING LOG")
-    log_content.append("=" * 80)
-    log_content.append(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log_content.append(f"Training started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    log_content.append("")
-    
-    # System Information
-    log_content.append("SYSTEM INFORMATION")
-    log_content.append("-" * 40)
-    log_content.append(f"PyTorch version: {torch.__version__}")
-    log_content.append(f"Device: {device}")
-    if torch.cuda.is_available():
-        log_content.append(f"CUDA device: {torch.cuda.get_device_name(0)}")
-        log_content.append(f"CUDA version: {torch.version.cuda}")
-    log_content.append("")
-    
-    # Command Line Arguments
-    log_content.append("COMMAND LINE ARGUMENTS")
-    log_content.append("-" * 40)
-    for arg, value in vars(args).items():
-        log_content.append(f"{arg}: {value}")
-    log_content.append("")
-    
-    # Model Information
-    log_content.append("MODEL INFORMATION")
-    log_content.append("-" * 40)
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log_content.append(f"Model type: MultiTaskPointTransformerV3")
-    log_content.append(f"Total parameters: {total_params:,}")
-    log_content.append(f"Trainable parameters: {trainable_params:,}")
-    log_content.append(f"Model size: {total_params * 4 / 1024 / 1024:.2f} MB (assuming float32)")
-    log_content.append("")
-    
-    # Data Information
-    log_content.append("DATA INFORMATION")
-    log_content.append("-" * 40)
-    log_content.append(f"Training batches: {len(train_dataloader)}")
-    log_content.append(f"Testing batches: {len(test_dataloader)}")
-    log_content.append(f"Batch size: {args.batch_size}")
-    log_content.append(f"Training fraction: {args.train_fraction}")
-    if args.num_events:
-        log_content.append(f"Number of events: {args.num_events}")
-    log_content.append("")
-    
-    # Training Configuration
-    log_content.append("TRAINING CONFIGURATION")
-    log_content.append("-" * 40)
-    log_content.append(f"Number of epochs: {args.num_epochs}")
-    log_content.append(f"Learning rate: {args.learning_rate}")
-    log_content.append(f"Weight decay: 1e-4")
-    log_content.append(f"Scheduler: CosineAnnealingLR")
-    log_content.append(f"T_max: {args.num_epochs}")
-    log_content.append(f"eta_min: 0.0001")
-    log_content.append("")
-    
-    # Model Architecture Details
-    log_content.append("MODEL ARCHITECTURE DETAILS")
-    log_content.append("-" * 40)
-    log_content.append(f"Number of point classes: 4 (Gamma1, Gamma2, Other, Cosmic)")
-    log_content.append(f"Number of event classes: 2 (Signal 1g, Background 2g)")
-    log_content.append(f"Input channels: 3 (x, y, z coordinates)")
-    log_content.append(f"Grid size: 0.1")
-    log_content.append(f"Event loss weight: 1.0")
-    log_content.append(f"Event classification enabled: True")
-    log_content.append("")
-    
-    # File Paths
-    log_content.append("FILE PATHS")
-    log_content.append("-" * 40)
-    log_content.append(f"Input file: {args.file}")
-    log_content.append(f"Output directory: {args.outdir}")
-    log_content.append("")
-    
-    # Wandb Information (if enabled)
-    if args.wandb:
-        log_content.append("WANDB CONFIGURATION")
-        log_content.append("-" * 40)
-        log_content.append(f"Project: {args.wandb_project}")
-        log_content.append(f"Entity: {args.wandb_entity}")
-        log_content.append(f"Run name: {args.wandb_run_name}")
-        log_content.append(f"Run URL: {wandb.run.get_url()}")
-        log_content.append("")
-        log_content.append("All parameters are also logged in wandb config for easy access.")
-        log_content.append("")
-    
-    # Footer
-    log_content.append("=" * 80)
-    log_content.append("END OF TRAINING LOG")
-    log_content.append("=" * 80)
-    
-    return "\n".join(log_content)
-
-
 if __name__ == "__main__":
 
     # Record start time
     start_time = datetime.now()
 
     parser = argparse.ArgumentParser(description="Train spacepoint SSV neural network.")
-    parser.add_argument('-f', '--file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/downsampled_spacepoints.pkl')
+    parser.add_argument('-f', '--input_file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/downsampled_spacepoints.pkl')
     parser.add_argument('-o', '--outdir', type=str, required=False, help='Path to directory to save logs and checkpoints.', default=f"training_files/{datetime.now().strftime("%Y_%m_%d-%H:%M:%S")}")
     parser.add_argument('-n', '--num_events', type=int, required=False, help='Number of training events to use.')
     parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.75)
@@ -683,17 +607,30 @@ if __name__ == "__main__":
     parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=50)
     parser.add_argument('-w', '--num_workers', type=int, required=False, help='Number of worker processes for data loading.', default=0)
     parser.add_argument('-ns', '--no_save', action='store_true', required=False, help='Do not save checkpoints.')
+    parser.add_argument('--random_seed', type=int, required=False, help='Random seed for training.', default=42)
+
     parser.add_argument('-wb', '--wandb', action='store_true', required=False, help='Use wandb to track training.')
-    parser.add_argument('-lr', '--learning_rate', type=float, required=False, help='Learning rate for training.', default=0.001)
     parser.add_argument('--wandb_project', type=str, required=False, help='Wandb project name.', default='spacepoint-ssv')
     parser.add_argument('--wandb_entity', type=str, required=False, help='Wandb entity/username.', default=None)
-    parser.add_argument('--wandb_run_name', type=str, required=False, help='Wandb run name.', default=None)
+    parser.add_argument('--name', type=str, required=False, help='Wandb run name.', default=None)
+
+    parser.add_argument('--event_loss_weight', type=float, required=False, help='Weight of event loss.', default=1.0)
+
+    parser.add_argument('--model_settings', type=str, required=False, help='Model settings.', default={'type': 'MultiTaskPointTransformerV3', 'grid_size': 2})
+
+    parser.add_argument('-lr', '--learning_rate', type=float, required=False, help='Learning rate for training.', default=1e-3)
+    parser.add_argument('--weight_decay', type=float, required=False, help='Weight decay for training.', default=1e-2)
+    parser.add_argument('--scheduler_settings', type=str, required=False, help='Scheduler type settings.', default={'type': 'CosineAnnealingLR'})
+
+    parser.add_argument('--training_type', type=str, required=False, help='Wandb run URL.', default='all_points')
+
     args = parser.parse_args()
 
-    if args.wandb_run_name is None:
-        args.wandb_run_name = f"spacepoint-ssv-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    else:
+    if args.name is not None:
         args.wandb = True
+        args.outdir = f"training_files/{args.name}"
+    else:
+        args.name = f"spacepoint-ssv-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
     if not args.no_save:
         os.makedirs(args.outdir, exist_ok=True)
@@ -710,72 +647,81 @@ if __name__ == "__main__":
         device = torch.device("cpu") # CPU on other machines
         print("Using CPU")
 
-    # Initialize wandb if enabled
+    if args.model_settings['type'] == 'MultiTaskPointTransformerV3' and device != torch.device("cuda:0"):
+        raise ValueError("MultiTaskPointTransformerV3 is only supported on CUDA GPUs")
+        
+    # Create comprehensive config with all parameter log information
+    config = {
+        # Basic training parameters
+        'input_file': args.input_file,
+        'outdir': args.outdir,
+        'num_events': args.num_events,
+        'train_fraction': args.train_fraction,
+        'batch_size': args.batch_size,
+        'num_epochs': args.num_epochs,
+        'num_workers': args.num_workers,
+        'random_seed': args.random_seed,
+        
+        'model_settings': args.model_settings,
+        'scheduler_settings': args.scheduler_settings,
+        'event_loss_weight': args.event_loss_weight,
+
+        'learning_rate': args.learning_rate,
+        'weight_decay': args.weight_decay,
+
+        'training_type': args.training_type,
+        
+        # System information
+        'pytorch_version': torch.__version__,
+        'device': str(device),
+        'cuda_available': torch.cuda.is_available(),
+        'training_start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    
+    if torch.cuda.is_available():
+        config.update({
+            'cuda_device_name': torch.cuda.get_device_name(0),
+            'cuda_version': torch.version.cuda,
+        })
+        
     if args.wandb:
-        
-        # Create comprehensive config with all parameter log information
-        config = {
-            # Basic training parameters
-            'file': args.file,
-            'outdir': args.outdir,
-            'num_events': args.num_events,
-            'train_fraction': args.train_fraction,
-            'batch_size': args.batch_size,
-            'num_epochs': args.num_epochs,
-            'num_workers': args.num_workers,
-            
-            # Model configuration
-            'model_type': 'MultiTaskPointTransformerV3',
-            'num_point_classes': 4,
-            'num_event_classes': 2,
-            'learning_rate': 0.001,
-            'weight_decay': 1e-4,
-            'scheduler_type': 'CosineAnnealingLR',
-            'scheduler_t_max': args.num_epochs,
-            'scheduler_eta_min': 0.0001,
-            'grid_size': 0.1,
-            'event_loss_weight': 1.0,
-            
-            # System information
-            'pytorch_version': torch.__version__,
-            'device': str(device),
-            'cuda_available': torch.cuda.is_available(),
-        }
-        
-        # Add CUDA information if available
-        if torch.cuda.is_available():
-            config.update({
-                'cuda_device_name': torch.cuda.get_device_name(0),
-                'cuda_version': torch.version.cuda,
-            })
-        
-        # Initialize wandb with comprehensive config
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=args.wandb_run_name,
-            config=config
+            name=args.name,
         )
         print(f"Initialized wandb run: {wandb.run.name}")
+        
+        config.update({
+            'wandb_project': args.wandb_project,
+            'wandb_entity': args.wandb_entity,
+            'name': args.name,
+            'wandb_run_url': wandb.run.url,
+        })
+
+    rng = torch.Generator()
+    rng.manual_seed(args.random_seed)
 
     # Create dataloaders
     print("Creating dataloaders")
-    train_dataloader, test_dataloader = create_dataloaders(
-        pickle_file=args.file,
+    train_dataloader, test_dataloader, num_train_events, num_test_events = create_dataloaders(
+        pickle_file=args.input_file,
         batch_size=args.batch_size,
         num_events=args.num_events,
         train_fraction=args.train_fraction,
         num_workers=args.num_workers,
-        random_seed=42,
+        random_seed=args.random_seed,
         out_dir=args.outdir,
-        no_save=args.no_save
+        no_save=args.no_save,
+        training_type=args.training_type,
+        rng=rng,
     )
     
     print(f"Training batches: {len(train_dataloader)}")
     print(f"Testing batches: {len(test_dataloader)}")
     
     # Get a sample batch to determine input dimensions
-    sample_batch_x, sample_batch_y, sample_batch_event_y = next(iter(train_dataloader))
+    sample_batch_coords, sample_batch_labels, sample_batch_event_y, sample_batch_indices, sample_batch_pair_conversion_coords = next(iter(train_dataloader))
     
     # Determine number of classes from the data
     num_point_classes = 4
@@ -792,59 +738,42 @@ if __name__ == "__main__":
     
     print(f"created model with {sum(p.numel() for p in model.parameters())} parameters")
     
-    # Log model info to wandb if enabled
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # Update wandb config with model parameters and data information
+    config.update({
+        'num_train_events': num_train_events,
+        'num_test_events': num_test_events,            
+        'num_training_batches': len(train_dataloader),
+        'num_testing_batches': len(test_dataloader),
+        'total_parameters': total_params,
+        'trainable_parameters': trainable_params,
+        'random_seed': args.random_seed,
+    })
+    
+    # tracks model parameters and gradients
     if args.wandb:
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        
-        # Update wandb config with model parameters and data information
-        wandb.config.update({
-            'total_parameters': total_params,
-            'trainable_parameters': trainable_params,
-            'model_size_mb': total_params * 4 / 1024 / 1024,
-            'training_batches': len(train_dataloader),
-            'testing_batches': len(test_dataloader),
-            'training_start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
-        })
-        
-        # Log model architecture
         wandb.watch(model, log="all", log_freq=100)
         
-        print(f"Logged model parameters to wandb: {total_params} total, {trainable_params} trainable")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+
+    if args.scheduler_settings['type'] == 'CosineAnnealingLR':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=args.learning_rate * 0.01)
+    else:
+        raise ValueError(f"Scheduler type {args.scheduler_settings['type']} not supported")
+
+    # save config information to a local file as well as wandb
+    with open(f"{args.outdir}/config.json", "w") as f:
+        json.dump(config, f, indent=4)
+    print(f"Configuration saved to: {args.outdir}/config.json")
+    if args.wandb:
+        wandb.config.update(config)
     
-    # Training setup
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-
-    # Cosine Annealing Scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=0.0001)
-    print(f"Using CosineAnnealingLR scheduler with T_max={args.num_epochs}, eta_min=0.0001")
-
-    # Create training log
-    parameter_log = create_parameter_log(args, model, device, train_dataloader, test_dataloader, start_time)
-
-    # Save training log to file
-    log_file_path = f"{args.outdir}/parameters.txt"
-    with open(log_file_path, "w") as f:
-        f.write(parameter_log)
-    print(f"Parameter log saved to: {log_file_path}")
-
-    # Upload training log to wandb if enabled
-    """if args.wandb:
-        artifact = wandb.Artifact(
-            name=f"parameters-{wandb.run.name}",
-            type="parameters",
-            description="Comprehensive parameters log with arguments, system info, and model details"
-        )
-        artifact.add_file(log_file_path)
-        wandb.log_artifact(artifact)
-        print("Training log uploaded to wandb as artifact")
-    """
-    
-    # Training loop
     print(f"Starting training for {args.num_epochs} epochs...")
 
     best_test_loss = float('inf')
-    
     for epoch in range(-1, args.num_epochs):
 
         if epoch == -1: # testing the random network before any training
@@ -872,20 +801,22 @@ if __name__ == "__main__":
                 'test_loss': test_loss,
             }, f'{args.outdir}/checkpoint_epoch_{epoch+1}.pth')
 
-        wandb.log({
-            'epoch': epoch,
-            'learning_rate': optimizer.param_groups[0]['lr'],
-            'train/loss': train_loss,
-            'train/point_loss': train_point_loss,
-            'train/event_loss': train_event_loss,
-            'train/point_accuracy': train_point_accuracy,
-            'test/loss': test_loss,
-            'test/point_loss': test_point_loss,
-            'test/event_loss': test_event_loss,
-            'test/point_accuracy': test_point_accuracy,
-        })
+        if args.wandb:
+            wandb.log({
+                'epoch': epoch,
+                'learning_rate': optimizer.param_groups[0]['lr'],
+                'train/loss': train_loss,
+                'train/point_loss': train_point_loss,
+                'train/event_loss': train_event_loss,
+                'train/point_accuracy': train_point_accuracy,
+                'test/loss': test_loss,
+                'test/point_loss': test_point_loss,
+                'test/event_loss': test_event_loss,
+                'test/point_accuracy': test_point_accuracy,
+            })
 
-        scheduler.step()
+        if epoch >= 0: # don't step the scheduler for the first loop, since that's just the random untrained network
+            scheduler.step()
             
     print("Training completed!")
     if not args.no_save:

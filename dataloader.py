@@ -9,8 +9,10 @@ class SpacepointDataset(Dataset):
     
     def __init__(self, 
                  pickle_file,
-                 num_events = None,
-                 random_seed = 42):
+                 num_events,
+                 random_seed,
+                 training_type,
+                 rng):
         """
         Initialize the dataset.
         
@@ -18,10 +20,17 @@ class SpacepointDataset(Dataset):
             pickle_file: Path to the pickle file containing spacepoint data
             num_events: Number of events to use (None for all events)
             random_seed: Random seed for reproducible shuffling
+            training_type: Type of training to perform
+                'all_points': Use all points
+                'only_photons': Use only photons
+                'only_neutrinos': Use only neutrinos
         """
+
         self.pickle_file = pickle_file
         self.num_events = num_events
         self.random_seed = random_seed
+        self.training_type = training_type
+        self.rng = rng
         
         # Load and preprocess data
         self._load_and_preprocess_data()
@@ -51,9 +60,18 @@ class SpacepointDataset(Dataset):
                                          + np.array([len(spacepoints) for spacepoints in self.real_gamma2_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_other_particles_downsampled_spacepoints])
                                          + np.array([len(spacepoints) for spacepoints in self.real_cosmic_downsampled_spacepoints]))
+        only_photons_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_gamma1_downsampled_spacepoints])
+                                                  + np.array([len(spacepoints) for spacepoints in self.real_gamma2_downsampled_spacepoints]))
+        only_neutrinos_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_cosmic_downsampled_spacepoints]))
 
-        # Require enough spacepoints in order to use this tool
-        enough_spacepoints_mask = total_num_spacepoints_per_event == 500
+        if self.training_type == "all_points":
+            enough_spacepoints_mask = total_num_spacepoints_per_event == 500
+        elif self.training_type == "only_photons":
+            enough_spacepoints_mask = only_photons_num_spacepoints_per_event > 0
+        elif self.training_type == "only_neutrinos":
+            enough_spacepoints_mask = only_neutrinos_num_spacepoints_per_event > 0
+        else:
+            raise ValueError(f"Invalid training type: {self.training_type}")
 
         # Require one or two true primary/pi0 gammas pair converting in the final volume
         sig_mask = self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1
@@ -76,10 +94,19 @@ class SpacepointDataset(Dataset):
         self.real_gamma2_downsampled_spacepoints = self.real_gamma2_downsampled_spacepoints[:self.num_events]
         self.real_other_particles_downsampled_spacepoints = self.real_other_particles_downsampled_spacepoints[:self.num_events]
         self.real_cosmic_downsampled_spacepoints = self.real_cosmic_downsampled_spacepoints[:self.num_events]
+
+        if self.training_type == "all_points":
+            pass
+        elif self.training_type == "only_photons":
+            self.real_other_particles_downsampled_spacepoints = [np.empty((0, 3)) for i in range(len(self.real_other_particles_downsampled_spacepoints))]
+            self.real_cosmic_downsampled_spacepoints = [np.empty((0, 3)) for i in range(len(self.real_cosmic_downsampled_spacepoints))]
+        elif self.training_type == "only_neutrinos":
+            self.real_other_particles_downsampled_spacepoints = [np.empty((0, 3)) for i in range(len(self.real_other_particles_downsampled_spacepoints))]
+        else:
+            raise ValueError(f"Invalid training type: {self.training_type}")
         
         print("Shuffling event ordering")
-        # shuffle the event ordering
-        shuffled_indices = self.true_gamma_info_df.sample(frac=1, random_state=self.random_seed).index
+        shuffled_indices = torch.randperm(self.num_events, generator=self.rng)
         self.true_gamma_info_df = self.true_gamma_info_df.iloc[shuffled_indices].reset_index(drop=True)
         self.real_gamma1_downsampled_spacepoints = [self.real_gamma1_downsampled_spacepoints[i] for i in shuffled_indices]
         self.real_gamma2_downsampled_spacepoints = [self.real_gamma2_downsampled_spacepoints[i] for i in shuffled_indices]
@@ -87,6 +114,22 @@ class SpacepointDataset(Dataset):
         self.real_cosmic_downsampled_spacepoints = [self.real_cosmic_downsampled_spacepoints[i] for i in shuffled_indices]
 
         self.event_y = torch.tensor(self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1, dtype=torch.long)
+        
+        # Extract true pair conversion coordinates
+        print("Extracting true pair conversion coordinates")
+        self.pair_conversion_coords = []
+        for event_idx in range(self.num_events):
+            # Get the pair conversion coordinates for this event
+            xs = self.true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_xs"]
+            ys = self.true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_ys"]
+            zs = self.true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_zs"]
+            
+            # Combine into a list of [x, y, z] coordinates
+            event_pair_coords = []
+            for i in range(len(xs)):
+                event_pair_coords.append([xs[i], ys[i], zs[i]])
+            
+            self.pair_conversion_coords.append(event_pair_coords)
         
         print("Creating spacepoint tensors")
         
@@ -100,25 +143,31 @@ class SpacepointDataset(Dataset):
             event_true_labels = []
             
             if len(self.real_gamma1_downsampled_spacepoints[event_idx]) > 0:
-                event_spacepoints.append(self.real_gamma1_downsampled_spacepoints[event_idx])
+                event_spacepoints.extend(self.real_gamma1_downsampled_spacepoints[event_idx])
                 event_true_labels.extend([0] * len(self.real_gamma1_downsampled_spacepoints[event_idx]))
             if len(self.real_gamma2_downsampled_spacepoints[event_idx]) > 0:
-                event_spacepoints.append(self.real_gamma2_downsampled_spacepoints[event_idx])
+                event_spacepoints.extend(self.real_gamma2_downsampled_spacepoints[event_idx])
                 event_true_labels.extend([1] * len(self.real_gamma2_downsampled_spacepoints[event_idx]))
             if len(self.real_other_particles_downsampled_spacepoints[event_idx]) > 0:
-                event_spacepoints.append(self.real_other_particles_downsampled_spacepoints[event_idx])
+                event_spacepoints.extend(self.real_other_particles_downsampled_spacepoints[event_idx])
                 event_true_labels.extend([2] * len(self.real_other_particles_downsampled_spacepoints[event_idx]))
             if len(self.real_cosmic_downsampled_spacepoints[event_idx]) > 0:
-                event_spacepoints.append(self.real_cosmic_downsampled_spacepoints[event_idx])
+                event_spacepoints.extend(self.real_cosmic_downsampled_spacepoints[event_idx])
                 event_true_labels.extend([3] * len(self.real_cosmic_downsampled_spacepoints[event_idx]))
+
+            assert len(event_spacepoints) == len(event_true_labels), f"Number of spacepoints ({len(event_spacepoints)}) and labels ({len(event_true_labels)}) do not match for event {event_idx}"
+
+            if len(event_spacepoints) == 0:
+                raise ValueError(f"Event {event_idx} has no spacepoints")
             
             # Combine all spacepoints for this event
-            if event_spacepoints:
-                event_spacepoints = np.vstack(event_spacepoints)  # Shape: (500, 3)
-                # Convert to tensor and transpose to (3, 500) format
-                event_tensor = torch.tensor(event_spacepoints, dtype=torch.float32).transpose(0, 1)  # Shape: (3, 500)
-                self.x.append(event_tensor)
-                self.y.append(torch.tensor(event_true_labels, dtype=torch.long))
+            event_spacepoints = np.vstack(event_spacepoints)  # Shape: (N, 3) where N can vary
+            event_true_labels = np.array(event_true_labels)
+
+            # Convert to tensor and transpose to (3, N) format
+            event_tensor = torch.tensor(event_spacepoints, dtype=torch.float32).transpose(0, 1)  # Shape: (3, N)
+            self.x.append(event_tensor)
+            self.y.append(torch.tensor(event_true_labels, dtype=torch.long))
         
         print(f"Created dataset with {len(self.x)} events")
         
@@ -130,12 +179,52 @@ class SpacepointDataset(Dataset):
         """Get a specific event from the dataset.
         
         Returns:
-            tuple: (spacepoint_coordinates, labels, event_label)
-            spacepoint_coordinates: tensor of shape (3, 500) for xyz coordinates
-            labels: tensor of shape (500,) for point labels
+            tuple: (spacepoint_coordinates, labels, event_label, pair_conversion_coords)
+            spacepoint_coordinates: tensor of shape (3, N) for xyz coordinates where N can vary
+            labels: tensor of shape (N,) for point labels where N can vary
             event_label: tensor of shape () for event-level label
+            pair_conversion_coords: list of [x, y, z] coordinates for true pair conversion points
         """
-        return self.x[idx], self.y[idx], self.event_y[idx]
+        return self.x[idx], self.y[idx], self.event_y[idx], self.pair_conversion_coords[idx]
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function that concatenates all points from all events in a batch.
+    This is the most efficient approach for variable-sized point clouds.
+    
+    Args:
+        batch: List of tuples (spacepoint_coordinates, labels, event_label, pair_conversion_coords)
+    
+    Returns:
+        Tuple of (batch_coords, batch_labels, batch_event_labels, batch_indices, batch_pair_conversion_coords)
+        batch_coords: tensor of shape (total_points, 3) - all points concatenated
+        batch_labels: tensor of shape (total_points,) - all labels concatenated
+        batch_event_labels: tensor of shape (batch_size,) - event-level labels
+        batch_indices: tensor of shape (total_points,) - batch index for each point
+        batch_pair_conversion_coords: list of lists of [x, y, z] coordinates for each event in batch
+    """
+    spacepoints, labels, event_labels, pair_conversion_coords = zip(*batch)
+    
+    # Concatenate all points and labels
+    all_coords = []
+    all_labels = []
+    all_batch_indices = []
+    
+    for i, (sp, lab) in enumerate(zip(spacepoints, labels)):
+        num_points = sp.shape[1]
+        all_coords.append(sp.transpose(0, 1))  # (3, N) -> (N, 3)
+        all_labels.append(lab)
+        all_batch_indices.append(torch.full((num_points,), i, dtype=torch.long))
+    
+    # Concatenate everything
+    batch_coords = torch.cat(all_coords, dim=0)  # (total_points, 3)
+    batch_labels = torch.cat(all_labels, dim=0)  # (total_points,)
+    batch_indices = torch.cat(all_batch_indices, dim=0)  # (total_points,)
+    batch_event_labels = torch.stack(event_labels, dim=0)  # (batch_size,)
+    batch_pair_conversion_coords = list(pair_conversion_coords)  # list of lists
+    
+    return batch_coords, batch_labels, batch_event_labels, batch_indices, batch_pair_conversion_coords
 
 
 def create_dataloaders(pickle_file,
@@ -145,7 +234,9 @@ def create_dataloaders(pickle_file,
                       num_workers,
                       random_seed,
                       out_dir,
-                      no_save):
+                      no_save,
+                      training_type,
+                      rng):
     """
     Create train and test dataloaders.
     
@@ -156,6 +247,10 @@ def create_dataloaders(pickle_file,
         train_fraction: Fraction of data to use for training
         num_workers: Number of worker processes for data loading
         random_seed: Random seed for reproducible splits
+        training_type: Type of training to perform
+            'all_points': Use all points
+            'only_photons': Use only photons
+            'only_neutrinos': Use only neutrinos
         
     Returns:
         Tuple of (train_dataloader, test_dataloader)
@@ -165,18 +260,24 @@ def create_dataloaders(pickle_file,
     full_dataset = SpacepointDataset(
         pickle_file=pickle_file,
         num_events=num_events,
-        random_seed=random_seed
+        random_seed=random_seed,
+        training_type=training_type,
+        rng=rng
     )
     
+    # Get the actual number of events after filtering
+    actual_num_events = len(full_dataset)
+    
     # Get unique events and create event-based splits
-    num_training_events = int(full_dataset.num_events * train_fraction)
+    num_train_events = int(actual_num_events * train_fraction)
+    num_test_events = actual_num_events - num_train_events
     
     # Shuffle events
     generator = torch.Generator().manual_seed(random_seed)
-    event_perm = torch.randperm(full_dataset.num_events, generator=generator)
+    event_perm = torch.randperm(actual_num_events, generator=generator)
     
-    train_event_indices = event_perm[:num_training_events]
-    test_event_indices = event_perm[num_training_events:]
+    train_event_indices = event_perm[:num_train_events]
+    test_event_indices = event_perm[num_train_events:]
     
     # Create train and test datasets using Subset
     from torch.utils.data import Subset
@@ -184,6 +285,7 @@ def create_dataloaders(pickle_file,
     test_dataset = Subset(full_dataset, test_event_indices)
 
     if not no_save:
+        # Use the actual indices from the filtered dataset
         train_rses = full_dataset.true_gamma_info_df.iloc[train_event_indices][["run", "subrun", "event"]].values
         np.savetxt(f'{out_dir}/train_RSEs.txt', train_rses, fmt='%d', delimiter=' ', header='run subrun event')
         print(f"Saved training RSEs to {out_dir}/train_RSEs.txt")
@@ -200,7 +302,8 @@ def create_dataloaders(pickle_file,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        collate_fn=custom_collate_fn
     )
     
     test_dataloader = DataLoader(
@@ -208,8 +311,10 @@ def create_dataloaders(pickle_file,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        collate_fn=custom_collate_fn,
+        generator=rng
     )
     
-    return train_dataloader, test_dataloader
+    return train_dataloader, test_dataloader, num_train_events, num_test_events
 
