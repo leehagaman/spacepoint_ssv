@@ -492,7 +492,7 @@ def delete_one_gamma_from_spacepoints(spacepoints, downsampled_deleted_gamma_EDe
     return spacepoints_with_deleted_gamma
 
 
-def downsample_spacepoints(spacepoints, reco_nu_vtx, rng=None, close_to_reco_nu_vtx_threshold=200, how="fps", num_events=None, spacepoints_edep=None):
+def downsample_spacepoints(spacepoints, reco_nu_vtx, rng=None, close_to_reco_nu_vtx_threshold=200, how="fps", num_events=None, spacepoints_edep=None, downsample_ratio=0.05, max_num_spacepoints=3000):
 
     downsampled_spacepoints = {}
     if num_events is None:
@@ -508,10 +508,20 @@ def downsample_spacepoints(spacepoints, reco_nu_vtx, rng=None, close_to_reco_nu_
         else:
             nearby_spacepoints_edep = None
 
+        num_spacepoints = len(nearby_spacepoints)
+
+        # choosing the number of spacepoints to downsample to
+        if num_spacepoints <= max_num_spacepoints:
+            target_num_spacepoints = num_spacepoints
+        else:
+            target_num_spacepoints = int(downsample_ratio * num_spacepoints)
+        if target_num_spacepoints > max_num_spacepoints:
+            target_num_spacepoints = max_num_spacepoints
+
         if how == "fps":
-            downsampled_spacepoints[event_i] = fps_clustering_downsample(nearby_spacepoints, 500, rng)
+            downsampled_spacepoints[event_i] = fps_clustering_downsample(nearby_spacepoints, target_num_spacepoints, rng)
         elif how == "energy_weighted_density":
-            downsampled_spacepoints[event_i] = energy_weighted_density_sampling(nearby_spacepoints, nearby_spacepoints_edep, 500, rng)
+            downsampled_spacepoints[event_i] = energy_weighted_density_sampling(nearby_spacepoints, nearby_spacepoints_edep, target_num_spacepoints, rng)
 
 
     return downsampled_spacepoints

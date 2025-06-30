@@ -187,7 +187,7 @@ def plot_event(index,
             z=Tcluster_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=1,
+                size=0.5,
                 color="blue",
                 opacity=0.8
             ),
@@ -202,7 +202,7 @@ def plot_event(index,
             z=downsampled_Tcluster_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color="blue",
                 opacity=0.8
             ),
@@ -217,7 +217,7 @@ def plot_event(index,
             z=Trec_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=1,
+                size=0.5,
                 color='red',
                 opacity=0.8
             ),
@@ -232,7 +232,7 @@ def plot_event(index,
             z=downsampled_Trec_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='red',
                 opacity=0.8
             ),
@@ -247,7 +247,7 @@ def plot_event(index,
             z=TrueEDep_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=1,
+                size=0.5,
                 color='orange',
                 opacity=0.8
             ),
@@ -262,7 +262,7 @@ def plot_event(index,
             z=true_gamma1_EDep_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=1,
+                size=0.5,
                 color='lightgreen',
                 opacity=0.8
             ),
@@ -277,7 +277,7 @@ def plot_event(index,
             z=true_gamma2_EDep_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=1,
+                size=0.5,
                 color='green',
                 opacity=0.8
             ),
@@ -292,7 +292,7 @@ def plot_event(index,
             z=other_particles_EDep_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=1,
+                size=0.5,
                 color='brown',
                 opacity=0.8
             ),
@@ -307,7 +307,7 @@ def plot_event(index,
             z=downsampled_TrueEDep_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='orange',
                 opacity=0.8
             ),
@@ -322,7 +322,7 @@ def plot_event(index,
             z=real_nu_reco_nu_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='orange',
                 opacity=0.8
             ),
@@ -337,7 +337,7 @@ def plot_event(index,
             z=real_nu_reco_cosmic_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='red',
                 opacity=0.8
             ),
@@ -352,7 +352,7 @@ def plot_event(index,
             z=real_cosmic_reco_nu_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='brown',
                 opacity=0.8
             ),
@@ -367,7 +367,7 @@ def plot_event(index,
             z=real_cosmic_reco_cosmic_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='blue',
                 opacity=0.8
             ),
@@ -382,7 +382,7 @@ def plot_event(index,
             z=real_gamma1_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3, 
+                size=1.5, 
                 color='lightgreen',
                 opacity=0.8
             ),
@@ -396,7 +396,7 @@ def plot_event(index,
             z=real_gamma2_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='green',
                 opacity=0.8
             ),
@@ -410,7 +410,7 @@ def plot_event(index,
             z=real_other_particles_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='brown',
                 opacity=0.8
             ),
@@ -424,7 +424,7 @@ def plot_event(index,
             z=real_cosmic_downsampled_spacepoints[index][:, 1],
             mode='markers',
             marker=dict(
-                size=3,
+                size=1.5,
                 color='blue',
                 opacity=0.8
             ),

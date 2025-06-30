@@ -19,7 +19,6 @@ from dataloader import create_dataloaders
 from models.my_PointTransformer_model import MultiTaskPointTransformerV3
 
 import matplotlib.pyplot as plt
-plt.rcParams.update({'font.size': 16})
 from sklearn.metrics import confusion_matrix
 
 
@@ -315,9 +314,7 @@ def test_step(model, test_dataloader, device, epoch, args):
     if epoch == -1 or epoch % 5 == 0 or epoch == args.num_epochs - 1:
 
         print("Creating extra test plots")
-        
-        plt.rcParams['figure.dpi'] = 600
-        
+                
         # flatten all_point_true_labels and all_point_predictions, so points from all events are together
         flattened_all_point_true_labels = []
         for all_point_true_labels_event in all_point_true_labels:
@@ -332,6 +329,7 @@ def test_step(model, test_dataloader, device, epoch, args):
         
         point_cm = confusion_matrix(flattened_all_point_true_labels, flattened_all_point_predictions)
         class_names = ['Gamma1', 'Gamma2', 'Other', 'Cosmic']
+        plt.rcParams.update({'font.size': 16})
         point_confusion_fig, point_confusion_ax = plt.subplots(figsize=(8, 6))
         im = point_confusion_ax.imshow(point_cm, interpolation='nearest', cmap='Blues')
         point_confusion_fig.colorbar(im)
@@ -461,112 +459,138 @@ def test_step(model, test_dataloader, device, epoch, args):
 
 
         # Create spacepoint-level visualization
-        spacepoint_fig, axs = plt.subplots(4, 4, figsize=(10, 8))
-
-        for event_i in range(8):
-
-            subset_event_i = event_i % 4
-
-            pred_col = 2 * (event_i // 4)
-            true_col = 2 * (event_i // 4) + 1
-            row = event_i % 4
-
-            pred_colors = []
-            true_colors = []
-
-            if pred_col == 0:
-                subset_point_predictions = subset_sig_point_predictions
-                subset_point_true_labels = subset_sig_point_true_labels
-                subset_point_spacepoints = subset_sig_spacepoints
-                subset_event_predictions = subset_sig_event_predictions
-                subset_event_true_labels = subset_sig_event_true_labels
-                subset_pair_conversion_coords = subset_sig_pair_conversion_coords
-            else:
-                subset_point_predictions = subset_bkg_point_predictions
-                subset_point_true_labels = subset_bkg_point_true_labels
-                subset_point_spacepoints = subset_bkg_spacepoints
-                subset_event_predictions = subset_bkg_event_predictions
-                subset_event_true_labels = subset_bkg_event_true_labels
-                subset_pair_conversion_coords = subset_bkg_pair_conversion_coords
-
-            if subset_event_i >= len(subset_point_predictions): # not enough events, don't plot here
-                continue
-
-            for i in range(len(subset_point_predictions[subset_event_i])):
-                pred_label = subset_point_predictions[subset_event_i][i]
-                true_label = subset_point_true_labels[subset_event_i][i]
-
-                if pred_label == 0:
-                    pred_colors.append('green')
-                elif pred_label == 1:
-                    pred_colors.append('lightgreen')
-                elif pred_label == 2:
-                    pred_colors.append('brown')
+        # Create individual plots for each event and save to wandb table
+        spacepoint_table_data = []
+        plt.rcParams.update({'font.size': 10})
+        
+        # Define event types and their corresponding data
+        event_types = [
+            ("Signal", subset_sig_point_predictions, subset_sig_point_true_labels, 
+             subset_sig_spacepoints, subset_sig_event_predictions, subset_sig_event_true_labels, 
+             subset_sig_pair_conversion_coords),
+            ("Background", subset_bkg_point_predictions, subset_bkg_point_true_labels, 
+             subset_bkg_spacepoints, subset_bkg_event_predictions, subset_bkg_event_true_labels, 
+             subset_bkg_pair_conversion_coords)
+        ]
+        
+        # Process both signal and background events
+        for event_type, point_predictions, point_true_labels, spacepoints, event_predictions, event_true_labels, pair_conversion_coords in event_types:
+            for event_i in range(min(len(point_predictions), num_spacepoint_plot_events)):
+                # Create single figure with two subplots side by side
+                fig, (pred_ax, true_ax) = plt.subplots(1, 2, figsize=(12, 6))
+                
+                # Create predicted plot (left subplot)
+                pred_colors = []
+                for i in range(len(point_predictions[event_i])):
+                    pred_label = point_predictions[event_i][i]
+                    if pred_label == 0:
+                        pred_colors.append('green')
+                    elif pred_label == 1:
+                        pred_colors.append('lightgreen')
+                    elif pred_label == 2:
+                        pred_colors.append('brown')
+                    else:
+                        pred_colors.append('blue')
+                
+                s = 0.1
+                
+                pred_ax.scatter(spacepoints[event_i][:, 2], 
+                               spacepoints[event_i][:, 0], 
+                               s=s, c=pred_colors)
+                
+                # Set plot limits and formatting
+                non_true_cosmic_indices = [i for i in range(len(spacepoints[event_i])) 
+                                         if point_true_labels[event_i][i] != 3]
+                non_true_cosmic_spacepoints = np.array([spacepoints[event_i][i] 
+                                                      for i in non_true_cosmic_indices])
+                
+                if len(non_true_cosmic_spacepoints) > 0:
+                    all_coords = np.vstack([non_true_cosmic_spacepoints, pair_conversion_coords[event_i]])
+                    min_x = min(all_coords[:, 2])
+                    max_x = max(all_coords[:, 2])
+                    min_y = min(all_coords[:, 0])
+                    max_y = max(all_coords[:, 0])
                 else:
-                    pred_colors.append('blue')
+                    min_x = min(spacepoints[event_i][:, 2])
+                    max_x = max(spacepoints[event_i][:, 2])
+                    min_y = min(spacepoints[event_i][:, 0])
+                    max_y = max(spacepoints[event_i][:, 0])
+                
+                x_width = max_x - min_x
+                y_width = max_y - min_y
+                extra_scale_factor = 0.2
+                pred_ax.set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
+                pred_ax.set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
+                
+                pred_ax.set_title(f'{event_type} Event {event_i} - Predicted')
+                pred_ax.set_xlabel('Z (cm)')
+                pred_ax.set_ylabel('X (cm)')
+                pred_ax.text(0.95, 0.05, f"Pred Signal Prob: {event_predictions[event_i]:.2f}", 
+                            transform=pred_ax.transAxes, ha='right', va='bottom', fontsize=10)
+                
+                # Create true plot (right subplot)
+                true_colors = []
+                for i in range(len(point_true_labels[event_i])):
+                    true_label = point_true_labels[event_i][i]
+                    if true_label == 0:
+                        true_colors.append('green')
+                    elif true_label == 1:
+                        true_colors.append('lightgreen')
+                    elif true_label == 2:
+                        true_colors.append('brown')
+                    else:
+                        true_colors.append('blue')
+                
+                true_ax.scatter(spacepoints[event_i][:, 2], 
+                               spacepoints[event_i][:, 0], 
+                               s=s, c=true_colors)
+                
+                # Plot pair conversion points as red stars
+                pair_x = [coord[2] for coord in pair_conversion_coords[event_i]]
+                pair_y = [coord[0] for coord in pair_conversion_coords[event_i]]
+                true_ax.scatter(pair_x, pair_y, 
+                               s=50, c='red', marker='*', edgecolors='black', linewidth=0.5)
+                
+                true_ax.set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
+                true_ax.set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
+                
+                true_ax.set_title(f'{event_type} Event {event_i} - True')
+                true_ax.set_xlabel('Z (cm)')
+                true_ax.set_ylabel('X (cm)')
+                true_ax.text(0.95, 0.05, f"True Signal: {event_true_labels[event_i]}", 
+                            transform=true_ax.transAxes, ha='right', va='bottom', fontsize=10)
+                
+                if len(non_true_cosmic_spacepoints) == 0:
+                    true_ax.text(0.5, 0.5, "No reco spacepoints\ncorresponding to \ntrue neutrino EDeps", 
+                                transform=true_ax.transAxes, ha='center', va='center', fontsize=8)
 
-                if true_label == 0:
-                    true_colors.append('green')
-                elif true_label == 1:
-                    true_colors.append('lightgreen')
-                elif true_label == 2:
-                    true_colors.append('brown')
-                else:
-                    true_colors.append('blue')
-
-            s = 0.15
-
-            axs[row, pred_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=pred_colors)
-            axs[row, true_col].scatter(subset_point_spacepoints[subset_event_i][:, 2], subset_point_spacepoints[subset_event_i][:, 0], s=s, c=true_colors)
-            
-            # Plot pair conversion points as red stars
-            for coord in subset_pair_conversion_coords[subset_event_i]:
-                pair_x = [coord[2] for coord in subset_pair_conversion_coords[subset_event_i]]  # z coordinate
-                pair_y = [coord[0] for coord in subset_pair_conversion_coords[subset_event_i]]  # x coordinate
-                axs[row, true_col].scatter(pair_x, pair_y, s=50, c='red', marker='*', edgecolors='black', linewidth=0.5)
-
-            axs[row, pred_col].set_xticks([])
-            axs[row, pred_col].set_yticks([])
-            axs[row, true_col].set_xticks([])
-            axs[row, true_col].set_yticks([])
-
-            non_true_cosmic_indices = [i for i in range(len(subset_point_spacepoints[subset_event_i])) if subset_point_true_labels[subset_event_i][i] != 3]
-            non_true_cosmic_spacepoints = np.array([subset_point_spacepoints[subset_event_i][i] for i in non_true_cosmic_indices])
-
-            if len(non_true_cosmic_spacepoints) > 0:
-                all_coords = np.vstack([non_true_cosmic_spacepoints, subset_pair_conversion_coords[subset_event_i]])
-                min_x = min(all_coords[:, 2])
-                max_x = max(all_coords[:, 2])
-                min_y = min(all_coords[:, 0])
-                max_y = max(all_coords[:, 0])
-            else:
-                # no reco spacepoints around the true spacepoints, so just use the cosmic reco spacepoints to set the range
-                min_x = min(subset_point_spacepoints[subset_event_i][:, 2])
-                max_x = max(subset_point_spacepoints[subset_event_i][:, 2])
-                min_y = min(subset_point_spacepoints[subset_event_i][:, 0])
-                max_y = max(subset_point_spacepoints[subset_event_i][:, 0])
-            x_width = max_x - min_x
-            y_width = max_y - min_y
-            extra_scale_factor = 0.2
-            axs[row, pred_col].set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
-            axs[row, pred_col].set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
-            axs[row, true_col].set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
-            axs[row, true_col].set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
-
-            axs[row, pred_col].text(0.95, 0.05, f"Pred Signal Prob: {subset_event_predictions[subset_event_i]:.2f}", transform=axs[row, pred_col].transAxes, ha='right', va='bottom', fontsize=8)
-            axs[row, true_col].text(0.95, 0.05, f"True Signal: {subset_event_true_labels[subset_event_i]}", transform=axs[row, true_col].transAxes, ha='right', va='bottom', fontsize=8)
-
-            if len(non_true_cosmic_spacepoints) == 0:
-                axs[row, true_col].text(0.8, 0.3, "No reco spacepoints\ncorresponding to \ntrue neutrino EDeps", transform=axs[row, true_col].transAxes, ha='center', va='center', fontsize=4)
-
-        spacepoint_fig.tight_layout()
+                fig.tight_layout()
+                
+                # Add to table data
+                spacepoint_table_data.append({
+                    "Event Type": event_type,
+                    "Event Index": event_i,
+                    "Event Plot": wandb.Image(fig),
+                    "Predicted Signal Probability": event_predictions[event_i],
+                    "True Signal Label": event_true_labels[event_i]
+                })
+                
+                fig.savefig(f'{args.outdir}/plots/spacepoint_plots/{event_type.lower()}_event_{event_i}.png', dpi=300)
+                plt.close(fig)
+        
+        # Create wandb table
+        if args.wandb and spacepoint_table_data:
+            spacepoint_table = wandb.Table(columns=["Event Type", "Event Index", "Event Plot", "Predicted Signal Probability", "True Signal Label"], 
+                                           data=[[row["Event Type"], row["Event Index"], row["Event Plot"], 
+                                                 row["Predicted Signal Probability"], 
+                                                 row["True Signal Label"]] for row in spacepoint_table_data])
         
         if args.wandb:
             wandb.log({
                 'test/point_confusion_matrix': wandb.Image(point_confusion_fig),
                 'test/event_score_histogram': wandb.Image(event_score_fig),
                 'test/point_category_histogram': wandb.Image(point_category_fig),
-                'test/spacepoint_visualization': wandb.Image(spacepoint_fig),
+                'test/spacepoint_visualization_table': spacepoint_table if spacepoint_table_data else None,
                 'test/efficiency_curve': wandb.Image(efficiency_fig),
                 'test/auc_curve': wandb.Image(auc_fig),
             })
@@ -574,14 +598,12 @@ def test_step(model, test_dataloader, device, epoch, args):
         point_confusion_fig.savefig(f'{args.outdir}/plots/point_confusion_fig.jpg', dpi=300)
         event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.jpg', dpi=300)
         point_category_fig.savefig(f'{args.outdir}/plots/point_category_fig.jpg', dpi=300)
-        spacepoint_fig.savefig(f'{args.outdir}/plots/spacepoint_fig.jpg', dpi=600)
         efficiency_fig.savefig(f'{args.outdir}/plots/efficiency_fig.jpg', dpi=300)
         auc_fig.savefig(f'{args.outdir}/plots/auc_fig.jpg', dpi=300)
 
         plt.close(point_confusion_fig)
         plt.close(event_score_fig)
         plt.close(point_category_fig)
-        plt.close(spacepoint_fig)
         plt.close(efficiency_fig)
         plt.close(auc_fig)
 
@@ -599,11 +621,11 @@ if __name__ == "__main__":
     start_time = datetime.now()
 
     parser = argparse.ArgumentParser(description="Train spacepoint SSV neural network.")
-    parser.add_argument('-f', '--input_file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/downsampled_spacepoints.pkl')
+    parser.add_argument('-f', '--input_file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/more_points.pkl')
     parser.add_argument('-o', '--outdir', type=str, required=False, help='Path to directory to save logs and checkpoints.', default=f"training_files/{datetime.now().strftime("%Y_%m_%d-%H:%M:%S")}")
     parser.add_argument('-n', '--num_events', type=int, required=False, help='Number of training events to use.')
     parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.75)
-    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=64)
+    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=32000)
     parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=50)
     parser.add_argument('-w', '--num_workers', type=int, required=False, help='Number of worker processes for data loading.', default=0)
     parser.add_argument('-ns', '--no_save', action='store_true', required=False, help='Do not save checkpoints.')
@@ -635,6 +657,7 @@ if __name__ == "__main__":
     if not args.no_save:
         os.makedirs(args.outdir, exist_ok=True)
         os.makedirs(f'{args.outdir}/plots', exist_ok=True)
+        os.makedirs(f'{args.outdir}/plots/spacepoint_plots', exist_ok=True)
 
     print("Pytorch version: ", torch.__version__)
     if torch.backends.mps.is_available():

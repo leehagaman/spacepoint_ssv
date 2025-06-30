@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import pickle
 import numpy as np
 import pandas as pd
@@ -65,7 +65,7 @@ class SpacepointDataset(Dataset):
         only_neutrinos_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_cosmic_downsampled_spacepoints]))
 
         if self.training_type == "all_points":
-            enough_spacepoints_mask = total_num_spacepoints_per_event == 500
+            enough_spacepoints_mask = total_num_spacepoints_per_event > 0
         elif self.training_type == "only_photons":
             enough_spacepoints_mask = only_photons_num_spacepoints_per_event > 0
         elif self.training_type == "only_neutrinos":
@@ -88,12 +88,17 @@ class SpacepointDataset(Dataset):
 
         if self.num_events is None:
             self.num_events = self.true_gamma_info_df.shape[0]
-        print(f"Restricting to first {self.num_events} events")
-        self.true_gamma_info_df = self.true_gamma_info_df.iloc[:self.num_events]
-        self.real_gamma1_downsampled_spacepoints = self.real_gamma1_downsampled_spacepoints[:self.num_events]
-        self.real_gamma2_downsampled_spacepoints = self.real_gamma2_downsampled_spacepoints[:self.num_events]
-        self.real_other_particles_downsampled_spacepoints = self.real_other_particles_downsampled_spacepoints[:self.num_events]
-        self.real_cosmic_downsampled_spacepoints = self.real_cosmic_downsampled_spacepoints[:self.num_events]
+
+        if self.num_events < len(self.true_gamma_info_df):
+            print(f"Restricting to first {self.num_events} events")
+            self.true_gamma_info_df = self.true_gamma_info_df.iloc[:self.num_events]
+            self.real_gamma1_downsampled_spacepoints = self.real_gamma1_downsampled_spacepoints[:self.num_events]
+            self.real_gamma2_downsampled_spacepoints = self.real_gamma2_downsampled_spacepoints[:self.num_events]
+            self.real_other_particles_downsampled_spacepoints = self.real_other_particles_downsampled_spacepoints[:self.num_events]
+            self.real_cosmic_downsampled_spacepoints = self.real_cosmic_downsampled_spacepoints[:self.num_events]
+
+        if self.num_events > len(self.true_gamma_info_df):
+            raise ValueError(f"num_events ({self.num_events}) is greater than the number of qualifying events in the dataset ({len(self.true_gamma_info_df)})")
 
         if self.training_type == "all_points":
             pass
@@ -107,6 +112,8 @@ class SpacepointDataset(Dataset):
         
         print("Shuffling event ordering")
         shuffled_indices = torch.randperm(self.num_events, generator=self.rng)
+        print("max of shuffled indices", shuffled_indices.max())
+        print("len of true_gamma_info_df", len(self.true_gamma_info_df))
         self.true_gamma_info_df = self.true_gamma_info_df.iloc[shuffled_indices].reset_index(drop=True)
         self.real_gamma1_downsampled_spacepoints = [self.real_gamma1_downsampled_spacepoints[i] for i in shuffled_indices]
         self.real_gamma2_downsampled_spacepoints = [self.real_gamma2_downsampled_spacepoints[i] for i in shuffled_indices]
@@ -188,6 +195,84 @@ class SpacepointDataset(Dataset):
         return self.x[idx], self.y[idx], self.event_y[idx], self.pair_conversion_coords[idx]
 
 
+class PointBasedBatchSampler(Sampler):
+    """
+    Custom batch sampler that creates batches based on maximum number of points.
+    This allows for more efficient batching when events have variable numbers of points.
+    """
+    
+    def __init__(self, dataset, max_points_per_batch, shuffle=True):
+        """
+        Initialize the batch sampler.
+        
+        Args:
+            dataset: The dataset to sample from
+            max_points_per_batch: Maximum number of points per batch
+            shuffle: Whether to shuffle the events
+        """
+        self.dataset = dataset
+        self.max_points_per_batch = max_points_per_batch
+        self.shuffle = shuffle
+        
+        # Get the number of points for each event
+        self.event_sizes = []
+        for i in range(len(dataset)):
+            _, labels, _, _ = dataset[i]
+            self.event_sizes.append(len(labels))
+        
+        self.event_sizes = np.array(self.event_sizes)
+        self.event_indices = np.arange(len(dataset))
+        
+        # Create batches
+        self.batches = self._create_batches()
+    
+    def _create_batches(self):
+        """Create batches based on maximum points per batch."""
+        batches = []
+        current_batch = []
+        current_batch_points = 0
+        
+        # Shuffle events if requested
+        if self.shuffle:
+            np.random.shuffle(self.event_indices)
+        
+        for event_idx in self.event_indices:
+            event_points = self.event_sizes[event_idx]
+            
+            # If adding this event would exceed the max points, start a new batch
+            if current_batch_points + event_points > self.max_points_per_batch and current_batch:
+                batches.append(current_batch)
+                current_batch = [event_idx]
+                current_batch_points = event_points
+            else:
+                current_batch.append(event_idx)
+                current_batch_points += event_points
+        
+        # Add the last batch if it's not empty
+        if current_batch:
+            batches.append(current_batch)
+        
+        # Log batch statistics
+        batch_sizes = [len(batch) for batch in batches]
+        batch_point_counts = [sum(self.event_sizes[batch]) for batch in batches]
+        print(f"Created {len(batches)} batches with max {self.max_points_per_batch} points per batch")
+        print(f"Average batch size: {np.mean(batch_sizes):.1f} events, {np.mean(batch_point_counts):.1f} points")
+        print(f"Batch size range: {min(batch_sizes)}-{max(batch_sizes)} events, {min(batch_point_counts)}-{max(batch_point_counts)} points")
+        
+        return batches
+    
+    def __iter__(self):
+        """Return an iterator over batches."""
+        if self.shuffle:
+            # Recreate batches with new shuffling
+            self.batches = self._create_batches()
+        return iter(self.batches)
+    
+    def __len__(self):
+        """Return the number of batches."""
+        return len(self.batches)
+
+
 def custom_collate_fn(batch):
     """
     Custom collate function that concatenates all points from all events in a batch.
@@ -242,7 +327,7 @@ def create_dataloaders(pickle_file,
     
     Args:
         pickle_file: Path to the pickle file containing spacepoint data
-        batch_size: Batch size for the dataloaders (number of events per batch)
+        batch_size: Maximum number of points per batch (not number of events)
         num_events: Number of events to use (None for all events)
         train_fraction: Fraction of data to use for training
         num_workers: Number of worker processes for data loading
@@ -253,7 +338,7 @@ def create_dataloaders(pickle_file,
             'only_neutrinos': Use only neutrinos
         
     Returns:
-        Tuple of (train_dataloader, test_dataloader)
+        Tuple of (train_dataloader, test_dataloader, num_train_events, num_test_events)
     """
     
     # Create a single dataset with all data
@@ -296,11 +381,24 @@ def create_dataloaders(pickle_file,
     # Determine if pin_memory should be used (only beneficial for CUDA)
     pin_memory = torch.cuda.is_available()
     
-    # Create dataloaders with batch indexing
+    # Create point-based batch samplers
+    print(f"Creating point-based batch samplers with max {batch_size} points per batch")
+    train_batch_sampler = PointBasedBatchSampler(
+        train_dataset, 
+        max_points_per_batch=batch_size, 
+        shuffle=True
+    )
+    
+    test_batch_sampler = PointBasedBatchSampler(
+        test_dataset, 
+        max_points_per_batch=batch_size, 
+        shuffle=False
+    )
+    
+    # Create dataloaders with point-based batching
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
+        batch_sampler=train_batch_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         collate_fn=custom_collate_fn
@@ -308,12 +406,10 @@ def create_dataloaders(pickle_file,
     
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_sampler=test_batch_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        collate_fn=custom_collate_fn,
-        generator=rng
+        collate_fn=custom_collate_fn
     )
     
     return train_dataloader, test_dataloader, num_train_events, num_test_events
