@@ -11,7 +11,7 @@ class SpacepointDataset(Dataset):
                  pickle_file,
                  num_events,
                  random_seed,
-                 training_type,
+                 spacepoints_type,
                  rng):
         """
         Initialize the dataset.
@@ -20,7 +20,7 @@ class SpacepointDataset(Dataset):
             pickle_file: Path to the pickle file containing spacepoint data
             num_events: Number of events to use (None for all events)
             random_seed: Random seed for reproducible shuffling
-            training_type: Type of training to perform
+            spacepoints_type: Type of training to perform
                 'all_points': Use all points
                 'only_photons': Use only photons
                 'only_neutrinos': Use only neutrinos
@@ -29,7 +29,7 @@ class SpacepointDataset(Dataset):
         self.pickle_file = pickle_file
         self.num_events = num_events
         self.random_seed = random_seed
-        self.training_type = training_type
+        self.spacepoints_type = spacepoints_type
         self.rng = rng
         
         # Load and preprocess data
@@ -64,14 +64,14 @@ class SpacepointDataset(Dataset):
                                                   + np.array([len(spacepoints) for spacepoints in self.real_gamma2_downsampled_spacepoints]))
         only_neutrinos_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_cosmic_downsampled_spacepoints]))
 
-        if self.training_type == "all_points":
+        if self.spacepoints_type == "all_points":
             enough_spacepoints_mask = total_num_spacepoints_per_event > 0
-        elif self.training_type == "only_photons":
+        elif self.spacepoints_type == "only_photons":
             enough_spacepoints_mask = only_photons_num_spacepoints_per_event > 0
-        elif self.training_type == "only_neutrinos":
+        elif self.spacepoints_type == "only_neutrinos":
             enough_spacepoints_mask = only_neutrinos_num_spacepoints_per_event > 0
         else:
-            raise ValueError(f"Invalid training type: {self.training_type}")
+            raise ValueError(f"Invalid training type: {self.spacepoints_type}")
 
         # Require one or two true primary/pi0 gammas pair converting in the final volume
         sig_mask = self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1
@@ -100,15 +100,15 @@ class SpacepointDataset(Dataset):
         if self.num_events > len(self.true_gamma_info_df):
             raise ValueError(f"num_events ({self.num_events}) is greater than the number of qualifying events in the dataset ({len(self.true_gamma_info_df)})")
 
-        if self.training_type == "all_points":
+        if self.spacepoints_type == "all_points":
             pass
-        elif self.training_type == "only_photons":
+        elif self.spacepoints_type == "only_photons":
             self.real_other_particles_downsampled_spacepoints = [np.empty((0, 3)) for i in range(len(self.real_other_particles_downsampled_spacepoints))]
             self.real_cosmic_downsampled_spacepoints = [np.empty((0, 3)) for i in range(len(self.real_cosmic_downsampled_spacepoints))]
-        elif self.training_type == "only_neutrinos":
+        elif self.spacepoints_type == "only_neutrinos":
             self.real_other_particles_downsampled_spacepoints = [np.empty((0, 3)) for i in range(len(self.real_other_particles_downsampled_spacepoints))]
         else:
-            raise ValueError(f"Invalid training type: {self.training_type}")
+            raise ValueError(f"Invalid training type: {self.spacepoints_type}")
         
         print("Shuffling event ordering")
         shuffled_indices = torch.randperm(self.num_events, generator=self.rng)
@@ -320,7 +320,7 @@ def create_dataloaders(pickle_file,
                       random_seed,
                       out_dir,
                       no_save,
-                      training_type,
+                      spacepoints_type,
                       rng):
     """
     Create train and test dataloaders.
@@ -332,7 +332,7 @@ def create_dataloaders(pickle_file,
         train_fraction: Fraction of data to use for training
         num_workers: Number of worker processes for data loading
         random_seed: Random seed for reproducible splits
-        training_type: Type of training to perform
+        spacepoints_type: Type of training to perform
             'all_points': Use all points
             'only_photons': Use only photons
             'only_neutrinos': Use only neutrinos
@@ -346,7 +346,7 @@ def create_dataloaders(pickle_file,
         pickle_file=pickle_file,
         num_events=num_events,
         random_seed=random_seed,
-        training_type=training_type,
+        spacepoints_type=spacepoints_type,
         rng=rng
     )
     

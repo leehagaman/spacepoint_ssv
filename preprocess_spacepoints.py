@@ -1,3 +1,19 @@
+"""
+Preprocessing script for spacepoint data with multiprocessing support.
+
+This script processes ROOT files containing spacepoint data and extracts downsampled
+spacepoints for machine learning applications. The chunk processing loop has been
+optimized with multiprocessing to handle large datasets more efficiently.
+
+Usage:
+    python preprocess_spacepoints.py -f <root_file> [-n <num_events>] [-p <num_processes>] [-s <seed>] [-o <output_file>]
+
+Multiprocessing:
+    - Use -p to specify the number of processes (default: auto-detect)
+    - Set -p 1 to force sequential processing
+    - The script will automatically fall back to sequential processing if multiprocessing fails
+    - I found that -p 4 works well, I think the limiting factor is reading the ROOT file, so a large number of processes just makes the first part of each process very slow
+"""
 import sys
 import uproot
 import numpy as np
@@ -5,10 +21,11 @@ from tqdm import tqdm
 import pickle
 import argparse
 import pandas as pd
+import multiprocessing as mp
 
 from helpers.spacepoint_sampling import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling
 
-def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices):
+def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices, rng=None):
 
     # loads non-spacepoint information from the root file, including RSE, true nu vtx, reco nu vtx, and true gamma info
 
@@ -72,7 +89,11 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices):
                 pi0_ids.append(wc_geant_dic["truth_id"][event_i][i])
 
         primary_or_pi0_gamma_ids = []
-        for i in rng.permutation(num_particles): # randomize the order here, so that when we delete one primary/pi0 photon, it's a random one
+        if rng is not None:
+            particle_indices = rng.permutation(num_particles)
+        else:
+            particle_indices = np.arange(num_particles)
+        for i in particle_indices: # randomize the order here, so that when we delete one primary/pi0 photon, it's a random one
             if wc_geant_dic["truth_mother"][event_i][i] in pi0_ids or wc_geant_dic["truth_mother"][event_i][i] == 0: # this is a daughter of a pi0 or a primary particle
                 if wc_geant_dic["truth_pdg"][event_i][i] == 22: # this is a photon from a pi0 or a primary photon (most likely from an eta or Delta radiative)
 
@@ -626,16 +647,99 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
     return (real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
             real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints)
 
+def process_chunk(chunk_data):
+    """
+    Process a single chunk of events for multiprocessing.
+    
+    Args:
+        chunk_data: Tuple containing (chunk_i, start_idx, end_idx, num_events, root_filename, true_gamma_1_geant_points, 
+                    true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types, 
+                    reco_nu_vtx, seed)
+    
+    Returns:
+        Tuple of processed chunk results
+    """
+    (chunk_i, start_idx, end_idx, num_events, root_filename, true_gamma_1_geant_points, 
+     true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types, 
+     reco_nu_vtx, seed) = chunk_data
+    
+    # Reopen the file in this process
+    f = uproot.open(root_filename)
+    
+    # Create a new random generator for this process
+    rng = np.random.default_rng(seed + chunk_i)  # Different seed for each chunk
+    
+    chunk_num_events = end_idx - start_idx
+
+    # Use the already-sliced geant points data
+    chunk_true_gamma_1_geant_points = true_gamma_1_geant_points
+    chunk_true_gamma_2_geant_points = true_gamma_2_geant_points
+    chunk_other_particles_geant_points = other_particles_geant_points
+    chunk_deleted_photon_types = deleted_photon_types
+    chunk_reco_nu_vtx = reco_nu_vtx
+
+    chunk_Tcluster_spacepoints, chunk_Trec_spacepoints, chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep = load_spacepoints_chunk(f, start_idx, end_idx)
+
+    chunk_categorized_outputs = categorize_true_EDeps(chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep, chunk_true_gamma_1_geant_points, chunk_true_gamma_2_geant_points, chunk_other_particles_geant_points, chunk_num_events)
+    chunk_true_gamma1_EDep_spacepoints = chunk_categorized_outputs[0]
+    chunk_true_gamma1_EDep_spacepoints_edep = chunk_categorized_outputs[1]
+    chunk_true_gamma2_EDep_spacepoints = chunk_categorized_outputs[2]
+    chunk_true_gamma2_EDep_spacepoints_edep = chunk_categorized_outputs[3]
+    chunk_other_particles_EDep_spacepoints = chunk_categorized_outputs[4]
+    chunk_other_particles_EDep_spacepoints_edep = chunk_categorized_outputs[5]
+
+    chunk_downsampled_true_gamma1_EDep_spacepoints = downsample_spacepoints(chunk_true_gamma1_EDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
+                                                                    num_events=chunk_num_events, spacepoints_edep=chunk_true_gamma1_EDep_spacepoints_edep)
+    chunk_downsampled_true_gamma2_EDep_spacepoints = downsample_spacepoints(chunk_true_gamma2_EDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
+                                                                    num_events=chunk_num_events, spacepoints_edep=chunk_true_gamma2_EDep_spacepoints_edep)
+    chunk_downsampled_other_particles_EDep_spacepoints = downsample_spacepoints(chunk_other_particles_EDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
+                                                                        num_events=chunk_num_events, spacepoints_edep=chunk_other_particles_EDep_spacepoints_edep)
+    chunk_downsampled_TrueEDep_spacepoints = downsample_spacepoints(chunk_TrueEDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
+                                                                    num_events=chunk_num_events, spacepoints_edep=chunk_TrueEDep_spacepoints_edep)
+
+    chunk_downsampled_deleted_gamma_EDep_spacepoints = []
+    chunk_downsampled_remaining_true_gamma1_EDep_spacepoints = []
+    chunk_downsampled_remaining_true_gamma2_EDep_spacepoints = []
+    for event_i in range(chunk_num_events):
+        if chunk_deleted_photon_types[event_i] == 1:
+            chunk_downsampled_deleted_gamma_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
+            chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(np.empty((0, 3)))
+            chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
+        elif chunk_deleted_photon_types[event_i] == 2:
+            chunk_downsampled_deleted_gamma_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
+            chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
+            chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(np.empty((0, 3)))
+        else:
+            chunk_downsampled_deleted_gamma_EDep_spacepoints.append(np.empty((0, 3)))
+            chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
+            chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
+
+    # deleting the photon from reco spacepoints here, in order to avoid any potential influence of the gamma deletion on the downsampling process
+    chunk_Tcluster_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(chunk_Tcluster_spacepoints, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
+    chunk_Trec_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(chunk_Trec_spacepoints, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
+    
+    chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Tcluster_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
+    chunk_downsampled_Trec_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Trec_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
+
+    chunk_categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma, chunk_downsampled_Trec_spacepoints_with_deleted_gamma, 
+                                                                                                chunk_downsampled_TrueEDep_spacepoints, chunk_downsampled_remaining_true_gamma1_EDep_spacepoints, 
+                                                                                                chunk_downsampled_remaining_true_gamma2_EDep_spacepoints, chunk_downsampled_other_particles_EDep_spacepoints, 
+                                                                                                num_events=chunk_num_events)
+
+    return chunk_categorized_downsampled_reco_spacepoints_outputs
+
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Pre-processing root file to extract spacepoint information.")
     parser.add_argument('-f', '--file', type=str, required=True, help='Path to root file to pre-process.')
-    parser.add_argument('-n', '--num_events', type=str, help='Number of events to process (default is entire file).')
+    parser.add_argument('-n', '--num_events', type=int, help='Number of events to process (default is entire file).')
     parser.add_argument('-ns', '--no_save', action='store_true', help='Do not save the downsampled spacepoints to a pickle file.')
     parser.add_argument('-fd', '--fraction_of_events_with_deleted_photons', type=float, help='Fraction of events with one photon deleted.', default=0.0)
     parser.add_argument('-s', '--seed', type=int, help='Random seed for reproducibility (default: 42).', default=42)
     parser.add_argument('-o', '--out_file', type=str, help='Output pickle file for the downsampled spacepoints.', default="downsampled_spacepoints.pkl")
+    parser.add_argument('-p', '--num_processes', type=int, help='Number of processes for multiprocessing (default: auto-detect).', default=None)
+    parser.add_argument('-c', '--chunk_size', type=int, help='Number of events to process in each chunk (default: 100).', default=100)
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         sys.exit(1)
@@ -653,27 +757,25 @@ if __name__ == "__main__":
     f = uproot.open(root_filename)
 
     if args.num_events is None:
-        num_events = len(f["wcpselection"]["T_eval"].arrays(["run"], library="np")["run"])
-        print(f"Number of events not specified, using all {num_events} events in file")
-    else:
-        num_events = int(args.num_events)
+        args.num_events = len(f["wcpselection"]["T_eval"].arrays(["run"], library="np")["run"])
+        print(f"Number of events not specified, using all {args.num_events} events in file")
 
     if args.fraction_of_events_with_deleted_photons == 0:
         deleted_gamma_indices = None
     else:
-        deleted_gamma_indices = rng.choice([0, 1], size=num_events, p=[1 - args.fraction_of_events_with_deleted_photons, args.fraction_of_events_with_deleted_photons])
+        deleted_gamma_indices = rng.choice([0, 1], size=args.num_events, p=[1 - args.fraction_of_events_with_deleted_photons, args.fraction_of_events_with_deleted_photons])
         deleted_gamma_indices = np.where(deleted_gamma_indices == 1)[0]
-        print(f"deleted one gamma in {len(deleted_gamma_indices)} / {num_events} events")
+        print(f"deleted one gamma in {len(deleted_gamma_indices)} / {args.num_events} events")
 
     print("getting true neutrino and gamma info")
     
-    true_nu_vtx, reco_nu_vtx, true_gamma_info_df, deleted_gamma_pf_indices = get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices)
+    true_nu_vtx, reco_nu_vtx, true_gamma_info_df, deleted_gamma_pf_indices = get_vtx_and_true_gamma_info(f, args.num_events, deleted_gamma_indices, rng)
 
     #print(true_gamma_info_df.head())
 
     print("getting true Geant4 spatial information to categorize spacepoints")
 
-    true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types = get_geant_points(f, num_events=num_events, num_interpolated_points=5, 
+    true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types = get_geant_points(f, num_events=args.num_events, num_interpolated_points=5, 
                                                                                                                                 deleted_gamma_indices=deleted_gamma_indices, 
                                                                                                                                 deleted_gamma_pf_indices=deleted_gamma_pf_indices)
     
@@ -687,66 +789,54 @@ if __name__ == "__main__":
     all_real_other_particles_downsampled_spacepoints = []
     all_real_cosmic_downsampled_spacepoints = []
 
-    chunk_size = 100
-    num_chunks = (num_events + chunk_size - 1) // chunk_size  # Ceiling division to include remainder
-    for chunk_i in tqdm(range(num_chunks), desc="Processing spacepoint data in chunks"):
+    chunk_size = args.chunk_size
+    num_chunks = (args.num_events + chunk_size - 1) // chunk_size  # Ceiling division to include remainder
+    
+    # Prepare chunk data for multiprocessing
+    chunk_data_list = []
+    for chunk_i in range(num_chunks):
         start_idx = chunk_i * chunk_size
-        end_idx = min(start_idx + chunk_size, num_events)
-        chunk_num_events = end_idx - start_idx
-
+        end_idx = min(start_idx + chunk_size, args.num_events)
+        
+        # Slice the geant points arrays for this chunk
         chunk_true_gamma_1_geant_points = true_gamma_1_geant_points[start_idx:end_idx]
         chunk_true_gamma_2_geant_points = true_gamma_2_geant_points[start_idx:end_idx]
         chunk_other_particles_geant_points = other_particles_geant_points[start_idx:end_idx]
         chunk_deleted_photon_types = deleted_photon_types[start_idx:end_idx]
         chunk_reco_nu_vtx = reco_nu_vtx[start_idx:end_idx]
-
-        chunk_Tcluster_spacepoints, chunk_Trec_spacepoints, chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep = load_spacepoints_chunk(f, start_idx, end_idx)
-
-        chunk_categorized_outputs = categorize_true_EDeps(chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep, chunk_true_gamma_1_geant_points, chunk_true_gamma_2_geant_points, chunk_other_particles_geant_points, chunk_num_events)
-        chunk_true_gamma1_EDep_spacepoints = chunk_categorized_outputs[0]
-        chunk_true_gamma1_EDep_spacepoints_edep = chunk_categorized_outputs[1]
-        chunk_true_gamma2_EDep_spacepoints = chunk_categorized_outputs[2]
-        chunk_true_gamma2_EDep_spacepoints_edep = chunk_categorized_outputs[3]
-        chunk_other_particles_EDep_spacepoints = chunk_categorized_outputs[4]
-        chunk_other_particles_EDep_spacepoints_edep = chunk_categorized_outputs[5]
-
-        chunk_downsampled_true_gamma1_EDep_spacepoints = downsample_spacepoints(chunk_true_gamma1_EDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
-                                                                        num_events=chunk_num_events, spacepoints_edep=chunk_true_gamma1_EDep_spacepoints_edep)
-        chunk_downsampled_true_gamma2_EDep_spacepoints = downsample_spacepoints(chunk_true_gamma2_EDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
-                                                                        num_events=chunk_num_events, spacepoints_edep=chunk_true_gamma2_EDep_spacepoints_edep)
-        chunk_downsampled_other_particles_EDep_spacepoints = downsample_spacepoints(chunk_other_particles_EDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
-                                                                            num_events=chunk_num_events, spacepoints_edep=chunk_other_particles_EDep_spacepoints_edep)
-        chunk_downsampled_TrueEDep_spacepoints = downsample_spacepoints(chunk_TrueEDep_spacepoints, chunk_reco_nu_vtx, rng, how="energy_weighted_density", 
-                                                                        num_events=chunk_num_events, spacepoints_edep=chunk_TrueEDep_spacepoints_edep)
-
-        chunk_downsampled_deleted_gamma_EDep_spacepoints = []
-        chunk_downsampled_remaining_true_gamma1_EDep_spacepoints = []
-        chunk_downsampled_remaining_true_gamma2_EDep_spacepoints = []
-        for event_i in range(chunk_num_events):
-            if chunk_deleted_photon_types[event_i] == 1:
-                chunk_downsampled_deleted_gamma_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
-                chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(np.empty((0, 3)))
-                chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
-            elif chunk_deleted_photon_types[event_i] == 2:
-                chunk_downsampled_deleted_gamma_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
-                chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
-                chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(np.empty((0, 3)))
-            else:
-                chunk_downsampled_deleted_gamma_EDep_spacepoints.append(np.empty((0, 3)))
-                chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
-                chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
-
-        chunk_Tcluster_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(chunk_Tcluster_spacepoints, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
-        chunk_Trec_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(chunk_Trec_spacepoints, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
         
-        chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Tcluster_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
-        chunk_downsampled_Trec_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Trec_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
-
-        chunk_categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma, chunk_downsampled_Trec_spacepoints_with_deleted_gamma, 
-                                                                                                    chunk_downsampled_TrueEDep_spacepoints, chunk_downsampled_remaining_true_gamma1_EDep_spacepoints, 
-                                                                                                    chunk_downsampled_remaining_true_gamma2_EDep_spacepoints, chunk_downsampled_other_particles_EDep_spacepoints, 
-                                                                                                    num_events=chunk_num_events)
-
+        chunk_data = (chunk_i, start_idx, end_idx, args.num_events, root_filename, 
+                      chunk_true_gamma_1_geant_points, chunk_true_gamma_2_geant_points, 
+                      chunk_other_particles_geant_points, chunk_deleted_photon_types, 
+                      chunk_reco_nu_vtx, args.seed)
+        chunk_data_list.append(chunk_data)
+    
+    # Use multiprocessing to process chunks in parallel
+    if args.num_processes is None:
+        num_processes = min(mp.cpu_count(), num_chunks)  # Don't use more processes than chunks
+    else:
+        num_processes = min(args.num_processes, num_chunks)  # Don't use more processes than chunks
+    
+    # If only one process is requested or only one chunk, use sequential processing
+    if num_processes <= 1:
+        print(f"Processing {num_chunks} chunks sequentially")
+        chunk_results = []
+        for chunk_data in tqdm(chunk_data_list, desc="Processing spacepoint data in chunks"):
+            chunk_results.append(process_chunk(chunk_data))
+    else:
+        print(f"Processing {num_chunks} chunks using {num_processes} processes")
+        try:
+            with mp.Pool(processes=num_processes) as pool:
+                chunk_results = list(tqdm(pool.imap(process_chunk, chunk_data_list), total=num_chunks, desc="Processing spacepoint data in chunks", smoothing=0))
+        except Exception as e:
+            print(f"Multiprocessing failed with error: {e}")
+            print("Falling back to sequential processing")
+            chunk_results = []
+            for chunk_data in tqdm(chunk_data_list, desc="Processing spacepoint data in chunks"):
+                chunk_results.append(process_chunk(chunk_data))
+    
+    # Combine results from all chunks
+    for chunk_categorized_downsampled_reco_spacepoints_outputs in chunk_results:
         chunk_real_nu_reco_nu_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[0]
         chunk_real_nu_reco_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[1]
         chunk_real_cosmic_reco_nu_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[2]

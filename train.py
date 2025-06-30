@@ -644,7 +644,7 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, required=False, help='Weight decay for training.', default=1e-2)
     parser.add_argument('--scheduler_settings', type=str, required=False, help='Scheduler type settings.', default={'type': 'CosineAnnealingLR'})
 
-    parser.add_argument('--training_type', type=str, required=False, help='Wandb run URL.', default='all_points')
+    parser.add_argument('--spacepoints_type', type=str, required=False, help='Type of spacepoints, either all_points, only_photons, or only_neutrinos.', default='all_points')
 
     args = parser.parse_args()
 
@@ -692,7 +692,7 @@ if __name__ == "__main__":
         'learning_rate': args.learning_rate,
         'weight_decay': args.weight_decay,
 
-        'training_type': args.training_type,
+        'spacepoints_type': args.spacepoints_type,
         
         # System information
         'pytorch_version': torch.__version__,
@@ -736,7 +736,7 @@ if __name__ == "__main__":
         random_seed=args.random_seed,
         out_dir=args.outdir,
         no_save=args.no_save,
-        training_type=args.training_type,
+        spacepoints_type=args.spacepoints_type,
         rng=rng,
     )
     
