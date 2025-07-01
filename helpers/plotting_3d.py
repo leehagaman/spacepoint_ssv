@@ -94,6 +94,9 @@ def plot_event(event_index, points_dic):
         points, color, cmap, size, visible_by_default = values
         points = np.array(points)
 
+        if points.shape == ():
+            continue
+
         if points.shape == (3,):
             fig.add_trace(go.Scatter3d(
                 x=[points[2]],

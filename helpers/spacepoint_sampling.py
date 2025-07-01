@@ -6,7 +6,7 @@ def fps_sampling(points, n_samples, rng=None):
     """
     Perform an optimized Farthest Point Sampling (FPS) using NumPy.
 
-    :param points: numpy array of shape (N, 3) representing the point cloud
+    :param points_maybe_with_charge: numpy array of shape (N, 3)
     :param n_samples: number of points to sample
     :param rng: random number generator instance
     :return: indices of sampled points
@@ -33,18 +33,28 @@ def fps_sampling(points, n_samples, rng=None):
         sampled_indices[i] = np.argmax(distances)
 
     sampled_points = points[sampled_indices]
-    
+
     return sampled_points
 
-def fps_clustering_downsample(points, n_samples, rng=None):
+
+def fps_clustering_downsample(points_maybe_with_charge, n_samples, rng=None):
     """
     Downsample the point cloud using FPS and clustering.
     
-    :param points: numpy array of shape (N, 3) representing the point cloud
+    :param points_maybe_with_charge: numpy array of shape (N, 3) or (N, 4) representing the point cloud, maybe including charge
     :param n_samples: number of points in the downsampled cloud
     :param rng: random number generator instance
     :return: downsampled point cloud
     """
+
+    if points_maybe_with_charge.shape[1] == 3: # just 3D points
+        points = points_maybe_with_charge
+        point_charges = None
+    elif points_maybe_with_charge.shape[1] == 4: # 3D points with charge
+        points = points_maybe_with_charge[:, :3]
+        point_charges = points_maybe_with_charge[:, 3]
+    else:
+        raise ValueError(f"Points must be of shape (3,) or (4,), got {points_maybe_with_charge.shape}")
 
     if rng is None:
         rng = np.random.default_rng()
@@ -65,8 +75,26 @@ def fps_clustering_downsample(points, n_samples, rng=None):
     # Use K-means clustering to associate other points with the samples
     kmeans = KMeans(n_clusters=n_samples, init=sampled_points, n_init=1)
     kmeans.fit(points)
+
+    downsampled_points = kmeans.cluster_centers_
+
+    if point_charges is None:
+        return downsampled_points
+
+    #Find the nearest downsampled point for each original point
+    nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(downsampled_points)
+    _, indices = nbrs.kneighbors(points)
+    
+    # Initialize charge sums array
+    charge_sums = np.zeros(len(sampled_points))
+    
+    # Sum charges for each downsampled point
+    for i, nearest_idx in enumerate(indices.flatten()):
+        charge_sums[nearest_idx] += point_charges[i]
+
+    downsampled_points_with_charge = np.concatenate([downsampled_points, charge_sums[:, np.newaxis]], axis=1)
         
-    return kmeans.cluster_centers_
+    return downsampled_points_with_charge
 
 def get_min_dists(points_A, points_B):
     """

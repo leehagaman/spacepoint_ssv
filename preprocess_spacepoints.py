@@ -396,7 +396,7 @@ def load_spacepoints_chunk(f, start_idx, end_idx):
     spacepoints = f["wcpselection"]["T_spacepoints"].arrays(["Tcluster_spacepoints_x", 
                                                                     "Tcluster_spacepoints_y", 
                                                                     "Tcluster_spacepoints_z", 
-                                                                    #"Tcluster_spacepoints_q",
+                                                                    "Tcluster_spacepoints_q",
                                                                     "Trec_spacepoints_x", 
                                                                     "Trec_spacepoints_y", 
                                                                     "Trec_spacepoints_z", 
@@ -411,16 +411,17 @@ def load_spacepoints_chunk(f, start_idx, end_idx):
                                                                     ], 
                                                                     entry_start=start_idx, entry_stop=end_idx, library="np")
     
-    Tcluster_spacepoints = []
+    Tcluster_spacepoints_with_charge = []
     Trec_spacepoints = []
     TrueEDep_spacepoints = []
     TrueEDep_spacepoints_edep = []
     for event_i in range(chunk_num_events):
 
         # reconstructed spacepoints 
-        Tcluster_spacepoints.append(np.stack([spacepoints["Tcluster_spacepoints_x"][event_i],
+        Tcluster_spacepoints_with_charge.append(np.stack([spacepoints["Tcluster_spacepoints_x"][event_i],
                                             spacepoints["Tcluster_spacepoints_y"][event_i],
-                                            spacepoints["Tcluster_spacepoints_z"][event_i]], axis=-1))
+                                            spacepoints["Tcluster_spacepoints_z"][event_i],
+                                            spacepoints["Tcluster_spacepoints_q"][event_i]], axis=-1))
         Trec_spacepoints.append(np.stack([spacepoints["Trec_spacepoints_x"][event_i],
                                         spacepoints["Trec_spacepoints_y"][event_i],
                                         spacepoints["Trec_spacepoints_z"][event_i]], axis=-1))
@@ -444,7 +445,7 @@ def load_spacepoints_chunk(f, start_idx, end_idx):
     del spacepoints
     del f
 
-    return Tcluster_spacepoints, Trec_spacepoints, TrueEDep_spacepoints, TrueEDep_spacepoints_edep
+    return Tcluster_spacepoints_with_charge, Trec_spacepoints, TrueEDep_spacepoints, TrueEDep_spacepoints_edep
 
 def categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, num_events):
     # we don't delete a photon here, we do that as part of the downsampling step later
@@ -488,34 +489,41 @@ def categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_
             other_particles_EDep_spacepoints, other_particles_EDep_spacepoints_edep)
 
 
-def delete_one_gamma_from_spacepoints(spacepoints, downsampled_deleted_gamma_EDep_spacepoints, distance_threshold=5, num_events=None):
+def delete_one_gamma_from_spacepoints(spacepoints_maybe_with_charge, downsampled_deleted_gamma_EDep_spacepoints, distance_threshold=5, num_events=None):
 
-    spacepoints_with_deleted_gamma = []
+    spacepoints_with_deleted_gamma_maybe_with_charge = []
 
     if num_events is None:
-        num_events = len(spacepoints)
+        num_events = len(spacepoints_maybe_with_charge)
 
     for event_i in range(num_events):
 
         if len(downsampled_deleted_gamma_EDep_spacepoints[event_i]) == 0: # no true photon spacepoints to delete, keeping everything as it was
-            spacepoints_with_deleted_gamma.append(spacepoints[event_i])
+            spacepoints_with_deleted_gamma_maybe_with_charge.append(spacepoints_maybe_with_charge[event_i])
             continue
 
-        if len(spacepoints[event_i]) == 0: # no Tcluster spacepoints, so nothing to delete
-            spacepoints_with_deleted_gamma.append(spacepoints[event_i])
+        if len(spacepoints_maybe_with_charge[event_i]) == 0: # no Tcluster spacepoints, so nothing to delete
+            spacepoints_with_deleted_gamma_maybe_with_charge.append(spacepoints_maybe_with_charge[event_i])
             continue
 
-        min_dists = get_min_dists(spacepoints[event_i], downsampled_deleted_gamma_EDep_spacepoints[event_i])
+        if spacepoints_maybe_with_charge[event_i].shape[1] == 3: # just 3D points
+            spacepoints_with_no_charge = spacepoints_maybe_with_charge[event_i]
+        elif spacepoints_maybe_with_charge[event_i].shape[1] == 4: # 3D points with charge
+            spacepoints_with_no_charge = spacepoints_maybe_with_charge[event_i][:, :3]
+        else:
+            raise ValueError(f"Points must be of shape (3,) or (4,), got {spacepoints_maybe_with_charge[event_i].shape}")
+
+        min_dists = get_min_dists(spacepoints_with_no_charge, downsampled_deleted_gamma_EDep_spacepoints[event_i])
         
         deleted_gamma_indices = np.where(min_dists < distance_threshold)[0]
-        spacepoints_with_deleted_gamma.append(np.delete(spacepoints[event_i], deleted_gamma_indices, axis=0))
+        spacepoints_with_deleted_gamma_maybe_with_charge.append(np.delete(spacepoints_maybe_with_charge[event_i], deleted_gamma_indices, axis=0))
 
-    return spacepoints_with_deleted_gamma
+    return spacepoints_with_deleted_gamma_maybe_with_charge
 
 
 def downsample_spacepoints(spacepoints, reco_nu_vtx, rng=None, close_to_reco_nu_vtx_threshold=200, how="fps", num_events=None, spacepoints_edep=None, downsample_ratio=0.05, max_num_spacepoints=3000):
 
-    downsampled_spacepoints = {}
+    downsampled_spacepoints = []
     if num_events is None:
         num_events = len(spacepoints)
 
@@ -540,20 +548,19 @@ def downsample_spacepoints(spacepoints, reco_nu_vtx, rng=None, close_to_reco_nu_
             target_num_spacepoints = max_num_spacepoints
 
         if how == "fps":
-            downsampled_spacepoints[event_i] = fps_clustering_downsample(nearby_spacepoints, target_num_spacepoints, rng)
+            downsampled_spacepoints.append(fps_clustering_downsample(nearby_spacepoints, target_num_spacepoints, rng))
         elif how == "energy_weighted_density":
-            downsampled_spacepoints[event_i] = energy_weighted_density_sampling(nearby_spacepoints, nearby_spacepoints_edep, target_num_spacepoints, rng)
-
+            downsampled_spacepoints.append(energy_weighted_density_sampling(nearby_spacepoints, nearby_spacepoints_edep, target_num_spacepoints, rng))
 
     return downsampled_spacepoints
 
 
-def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
+def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints_maybe_with_charge, downsampled_Trec_spacepoints, downsampled_TrueEDep_spacepoints, 
                                             downsampled_true_gamma1_EDep_spacepoints, downsampled_true_gamma2_EDep_spacepoints, downsampled_other_particles_EDep_spacepoints,
                                             distance_threshold = 5, num_events=None):
     
     if num_events is None:
-        num_events = len(downsampled_Tcluster_spacepoints)
+        num_events = len(downsampled_Tcluster_spacepoints_maybe_with_charge)
         
     real_nu_reco_nu_downsampled_spacepoints = []
     real_nu_reco_cosmic_downsampled_spacepoints = []
@@ -568,7 +575,7 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
 
     for event_i in range(num_events):
 
-        if len(downsampled_Tcluster_spacepoints[event_i]) == 0:
+        if len(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i]) == 0:
             real_nu_reco_cosmic_downsampled_spacepoints.append(np.empty((0, 3)))
             real_nu_reco_nu_downsampled_spacepoints.append(np.empty((0, 3)))
             real_cosmic_reco_nu_downsampled_spacepoints.append(np.empty((0, 3)))
@@ -580,17 +587,17 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
             continue
 
         # for T_cluster spacepoints, noting distances to true nu and reco nu spacepoints, and which are close to the reco nu vtx
-        min_truth_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_TrueEDep_spacepoints[event_i][:, :3])
-        min_reco_nu_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_Trec_spacepoints[event_i][:, :3])
-        min_true_gamma1_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_true_gamma1_EDep_spacepoints[event_i][:, :3])
-        min_true_gamma2_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_true_gamma2_EDep_spacepoints[event_i][:, :3])
-        min_other_particles_dists = get_min_dists(downsampled_Tcluster_spacepoints[event_i][:, :3], downsampled_other_particles_EDep_spacepoints[event_i][:, :3])
+        min_truth_dists = get_min_dists(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][:, :3], downsampled_TrueEDep_spacepoints[event_i][:, :3])
+        min_reco_nu_dists = get_min_dists(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][:, :3], downsampled_Trec_spacepoints[event_i][:, :3])
+        min_true_gamma1_dists = get_min_dists(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][:, :3], downsampled_true_gamma1_EDep_spacepoints[event_i][:, :3])
+        min_true_gamma2_dists = get_min_dists(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][:, :3], downsampled_true_gamma2_EDep_spacepoints[event_i][:, :3])
+        min_other_particles_dists = get_min_dists(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][:, :3], downsampled_other_particles_EDep_spacepoints[event_i][:, :3])
 
         # Create mutually exclusive categories using priority-based assignment
         # Priority order: gamma1 > gamma2 > other_particles > cosmic
         # Each spacepoint is assigned to the category with the smallest distance (if within threshold)
         
-        num_spacepoints = len(downsampled_Tcluster_spacepoints[event_i])
+        num_spacepoints = len(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i])
         category_assignments = np.full(num_spacepoints, -1, dtype=int)  # -1 = unassigned
         
         # Ensure distance arrays are properly shaped
@@ -634,18 +641,21 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints, do
         real_cosmic_reco_nu_indices = np.intersect1d(close_to_reco_nu_indices, far_from_truth_indices)
         real_cosmic_reco_cosmic_indices = np.intersect1d(far_from_reco_nu_indices, far_from_truth_indices)
 
-        real_nu_reco_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][real_nu_reco_cosmic_indices, :])
-        real_nu_reco_nu_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][real_nu_reco_nu_indices, :])
-        real_cosmic_reco_nu_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][real_cosmic_reco_nu_indices, :])
-        real_cosmic_reco_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][real_cosmic_reco_cosmic_indices, :])
+        real_nu_reco_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][real_nu_reco_cosmic_indices, :])
+        real_nu_reco_nu_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][real_nu_reco_nu_indices, :])
+        real_cosmic_reco_nu_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][real_cosmic_reco_nu_indices, :])
+        real_cosmic_reco_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][real_cosmic_reco_cosmic_indices, :])
 
-        real_gamma1_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][gamma1_indices, :])
-        real_gamma2_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][gamma2_indices, :])
-        real_other_particles_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][other_particles_indices, :])
-        real_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints[event_i][cosmic_indices, :])
+        real_gamma1_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][gamma1_indices, :])
+        real_gamma2_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][gamma2_indices, :])
+        real_other_particles_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][other_particles_indices, :])
+        real_cosmic_downsampled_spacepoints.append(downsampled_Tcluster_spacepoints_maybe_with_charge[event_i][cosmic_indices, :])
 
-    return (real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
-            real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints)
+    return (downsampled_Tcluster_spacepoints_maybe_with_charge, 
+            real_nu_reco_nu_downsampled_spacepoints, real_nu_reco_cosmic_downsampled_spacepoints, 
+            real_cosmic_reco_nu_downsampled_spacepoints, real_cosmic_reco_cosmic_downsampled_spacepoints, 
+            real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, 
+            real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints)
 
 def process_chunk(chunk_data):
     """
@@ -659,7 +669,7 @@ def process_chunk(chunk_data):
     Returns:
         Tuple of processed chunk results
     """
-    (chunk_i, start_idx, end_idx, num_events, root_filename, true_gamma_1_geant_points, 
+    (chunk_i, start_idx, end_idx, root_filename, true_gamma_1_geant_points, 
      true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types, 
      reco_nu_vtx, seed) = chunk_data
     
@@ -678,7 +688,7 @@ def process_chunk(chunk_data):
     chunk_deleted_photon_types = deleted_photon_types
     chunk_reco_nu_vtx = reco_nu_vtx
 
-    chunk_Tcluster_spacepoints, chunk_Trec_spacepoints, chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep = load_spacepoints_chunk(f, start_idx, end_idx)
+    chunk_Tcluster_spacepoints_with_charge, chunk_Trec_spacepoints, chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep = load_spacepoints_chunk(f, start_idx, end_idx)
 
     chunk_categorized_outputs = categorize_true_EDeps(chunk_TrueEDep_spacepoints, chunk_TrueEDep_spacepoints_edep, chunk_true_gamma_1_geant_points, chunk_true_gamma_2_geant_points, chunk_other_particles_geant_points, chunk_num_events)
     chunk_true_gamma1_EDep_spacepoints = chunk_categorized_outputs[0]
@@ -715,13 +725,13 @@ def process_chunk(chunk_data):
             chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
 
     # deleting the photon from reco spacepoints here, in order to avoid any potential influence of the gamma deletion on the downsampling process
-    chunk_Tcluster_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(chunk_Tcluster_spacepoints, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
+    chunk_Tcluster_spacepoints_with_deleted_gamma_with_charge = delete_one_gamma_from_spacepoints(chunk_Tcluster_spacepoints_with_charge, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
     chunk_Trec_spacepoints_with_deleted_gamma = delete_one_gamma_from_spacepoints(chunk_Trec_spacepoints, chunk_downsampled_deleted_gamma_EDep_spacepoints, num_events=chunk_num_events)
     
-    chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Tcluster_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
+    chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma_with_charge = downsample_spacepoints(chunk_Tcluster_spacepoints_with_deleted_gamma_with_charge, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
     chunk_downsampled_Trec_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Trec_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
 
-    chunk_categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma, chunk_downsampled_Trec_spacepoints_with_deleted_gamma, 
+    chunk_categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma_with_charge, chunk_downsampled_Trec_spacepoints_with_deleted_gamma, 
                                                                                                 chunk_downsampled_TrueEDep_spacepoints, chunk_downsampled_remaining_true_gamma1_EDep_spacepoints, 
                                                                                                 chunk_downsampled_remaining_true_gamma2_EDep_spacepoints, chunk_downsampled_other_particles_EDep_spacepoints, 
                                                                                                 num_events=chunk_num_events)
@@ -779,7 +789,7 @@ if __name__ == "__main__":
                                                                                                                                 deleted_gamma_indices=deleted_gamma_indices, 
                                                                                                                                 deleted_gamma_pf_indices=deleted_gamma_pf_indices)
     
-
+    all_downsampled_Tcluster_spacepoints_with_charge = []
     all_real_nu_reco_nu_downsampled_spacepoints = []
     all_real_nu_reco_cosmic_downsampled_spacepoints = []
     all_real_cosmic_reco_nu_downsampled_spacepoints = []
@@ -805,7 +815,7 @@ if __name__ == "__main__":
         chunk_deleted_photon_types = deleted_photon_types[start_idx:end_idx]
         chunk_reco_nu_vtx = reco_nu_vtx[start_idx:end_idx]
         
-        chunk_data = (chunk_i, start_idx, end_idx, args.num_events, root_filename, 
+        chunk_data = (chunk_i, start_idx, end_idx, root_filename, 
                       chunk_true_gamma_1_geant_points, chunk_true_gamma_2_geant_points, 
                       chunk_other_particles_geant_points, chunk_deleted_photon_types, 
                       chunk_reco_nu_vtx, args.seed)
@@ -836,16 +846,18 @@ if __name__ == "__main__":
                 chunk_results.append(process_chunk(chunk_data))
     
     # Combine results from all chunks
-    for chunk_categorized_downsampled_reco_spacepoints_outputs in chunk_results:
-        chunk_real_nu_reco_nu_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[0]
-        chunk_real_nu_reco_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[1]
-        chunk_real_cosmic_reco_nu_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[2]
-        chunk_real_cosmic_reco_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[3]
-        chunk_real_gamma1_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[4]
-        chunk_real_gamma2_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[5]
-        chunk_real_other_particles_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[6]
-        chunk_real_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[7]
+    for chunk_i, chunk_categorized_downsampled_reco_spacepoints_outputs in enumerate(chunk_results):
+        chunk_downsampled_Tcluster_spacepoints_with_charge = chunk_categorized_downsampled_reco_spacepoints_outputs[0]
+        chunk_real_nu_reco_nu_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[1]
+        chunk_real_nu_reco_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[2]
+        chunk_real_cosmic_reco_nu_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[3]
+        chunk_real_cosmic_reco_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[4]
+        chunk_real_gamma1_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[5]
+        chunk_real_gamma2_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[6]
+        chunk_real_other_particles_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[7]
+        chunk_real_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[8]
 
+        all_downsampled_Tcluster_spacepoints_with_charge.extend(chunk_downsampled_Tcluster_spacepoints_with_charge)
         all_real_nu_reco_nu_downsampled_spacepoints.extend(chunk_real_nu_reco_nu_downsampled_spacepoints)
         all_real_nu_reco_cosmic_downsampled_spacepoints.extend(chunk_real_nu_reco_cosmic_downsampled_spacepoints)
         all_real_cosmic_reco_nu_downsampled_spacepoints.extend(chunk_real_cosmic_reco_nu_downsampled_spacepoints)
@@ -859,6 +871,7 @@ if __name__ == "__main__":
         print("saving downsampled spacepoints to pickle file")
         with open("intermediate_files/" + args.out_file, "wb") as f:
             pickle.dump((true_gamma_info_df, 
+                         all_downsampled_Tcluster_spacepoints_with_charge,
                          all_real_nu_reco_nu_downsampled_spacepoints, all_real_nu_reco_cosmic_downsampled_spacepoints,
                          all_real_cosmic_reco_nu_downsampled_spacepoints, all_real_cosmic_reco_cosmic_downsampled_spacepoints,
                          all_real_gamma1_downsampled_spacepoints, all_real_gamma2_downsampled_spacepoints, 
