@@ -742,17 +742,14 @@ def process_chunk(chunk_data):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Pre-processing root file to extract spacepoint information.")
-    parser.add_argument('-f', '--file', type=str, required=True, help='Path to root file to pre-process.')
+    parser.add_argument('-f', '--file', type=str, help='Path to root file to pre-process.', default="input_files/bdt_convert_superunified_bnb_ncpi0_full_spacepoints.root")
     parser.add_argument('-n', '--num_events', type=int, help='Number of events to process (default is entire file).')
     parser.add_argument('-ns', '--no_save', action='store_true', help='Do not save the downsampled spacepoints to a pickle file.')
-    parser.add_argument('-fd', '--fraction_of_events_with_deleted_photons', type=float, help='Fraction of events with one photon deleted.', default=0.0)
+    parser.add_argument('-fd', '--fraction_of_events_with_deleted_photons', type=float, help='Fraction of events with one photon deleted.', default=0.5)
     parser.add_argument('-s', '--seed', type=int, help='Random seed for reproducibility (default: 42).', default=42)
     parser.add_argument('-o', '--out_file', type=str, help='Output pickle file for the downsampled spacepoints.', default="downsampled_spacepoints.pkl")
-    parser.add_argument('-p', '--num_processes', type=int, help='Number of processes for multiprocessing (default: auto-detect).', default=None)
+    parser.add_argument('-p', '--num_processes', type=int, help='Number of processes for multiprocessing.', default=4)
     parser.add_argument('-c', '--chunk_size', type=int, help='Number of events to process in each chunk (default: 100).', default=100)
-    if len(sys.argv) == 1:
-        parser.print_help(sys.stderr)
-        sys.exit(1)
     args = parser.parse_args()
 
     # Create a random generator with the specified seed for reproducibility

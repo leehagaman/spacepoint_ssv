@@ -41,13 +41,13 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
     batch_point_accuracies = []
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
-    for batch_idx, (batch_coords, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(train_pbar):
+    for batch_idx, (batch_features, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(train_pbar):
         # batch_coords has shape (total_points, 3) - all points from all events concatenated
         # batch_labels has shape (total_points,) - all labels concatenated
         # batch_event_y has shape (batch_size,) - event-level labels
         # batch_indices has shape (total_points,) - batch index for each point
         # batch_pair_conversion_coords is a list of lists of [x, y, z] coordinates for each event in batch
-        batch_coords = batch_coords.to(device)
+        batch_features = batch_features.to(device)
         batch_labels = batch_labels.to(device)
         batch_event_y = batch_event_y.to(device)
         batch_indices = batch_indices.to(device)
@@ -55,13 +55,18 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         B = batch_event_y.size(0)  # Number of events in this batch
         
         optimizer.zero_grad()
+
+        if batch_features.shape[1] == 4: # including charge
+            batch_coords = batch_features[:, :3]
+        else:
+            batch_coords = batch_features
         
-        # Prepare data for MultiTaskPointTransformerV3
-        coord = batch_coords.contiguous()  # [total_points, 3] - make contiguous
+        coord = batch_coords.contiguous()
+        feat = batch_features.contiguous()
         
         data_dict = {
             'coord': coord,
-            'feat': coord,  # Use coordinates as initial features
+            'feat': feat, # either xyz or xyzq
             'grid_size': torch.tensor(args.model_settings['grid_size'], device=device),
             'batch': batch_indices  # [total_points] - tells model which points belong to which event
         }
@@ -170,7 +175,7 @@ def test_step(model, test_dataloader, device, epoch, args):
     all_event_true_labels = []
     
     # for spacepoint-level visualization
-    num_spacepoint_plot_events = 4
+    num_spacepoint_plot_events = 8
     subset_sig_point_predictions = []
     subset_sig_point_true_labels = []
     subset_sig_spacepoints = []
@@ -186,26 +191,31 @@ def test_step(model, test_dataloader, device, epoch, args):
 
     with torch.no_grad():
         test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
-        for batch_idx, (batch_coords, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(test_pbar):
+        for batch_idx, (batch_features, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(test_pbar):
             # batch_coords has shape (total_points, 3) - all points from all events concatenated
             # batch_labels has shape (total_points,) - all labels concatenated
             # batch_event_y has shape (batch_size,) - event-level labels
             # batch_indices has shape (total_points,) - batch index for each point
             # batch_pair_conversion_coords is a list of lists of [x, y, z] coordinates for each event in batch
-            batch_coords = batch_coords.to(device)
+            batch_features = batch_features.to(device)
             batch_labels = batch_labels.to(device)
             batch_event_y = batch_event_y.to(device)
             batch_indices = batch_indices.to(device)
 
             B = batch_event_y.size(0)  # Number of events in this batch
             num_test_events += B
+
+            if batch_features.shape[1] == 4: # including charge
+                batch_coords = batch_features[:, :3]
+            else:
+                batch_coords = batch_features
             
-            # Prepare data for MultiTaskPointTransformerV3
-            coord = batch_coords.contiguous()  # [total_points, 3] - make contiguous
+            coord = batch_coords.contiguous()
+            feat = batch_features.contiguous()
             
             data_dict = {
                 'coord': coord,
-                'feat': coord,  # Use coordinates as initial features
+                'feat': feat,
                 'grid_size': torch.tensor(args.model_settings['grid_size'], device=device),
                 'batch': batch_indices  # [total_points] - tells model which points belong to which event
             }
@@ -304,11 +314,6 @@ def test_step(model, test_dataloader, device, epoch, args):
                 'Point_Loss': f'{point_loss.item():.4f}',
                 'Event_Loss': f'{event_loss.item():.4f}',
             })
-    
-    avg_test_loss = total_test_loss / num_test_events
-    avg_test_point_loss = total_test_point_loss / num_test_events
-    avg_test_event_loss = total_test_event_loss / num_test_events
-    avg_test_point_accuracy = 100 * total_test_correct_points / total_test_num_points
     
     # Create extra test plots
     if epoch == -1 or epoch % 5 == 0 or epoch == args.num_epochs - 1:
@@ -486,13 +491,13 @@ def test_step(model, test_dataloader, device, epoch, args):
                     if pred_label == 0:
                         pred_colors.append('green')
                     elif pred_label == 1:
-                        pred_colors.append('lightgreen')
+                        pred_colors.append('lawngreen')
                     elif pred_label == 2:
                         pred_colors.append('brown')
                     else:
                         pred_colors.append('blue')
                 
-                s = 0.1
+                s = 0.2
                 
                 pred_ax.scatter(spacepoints[event_i][:, 2], 
                                spacepoints[event_i][:, 0], 
@@ -515,6 +520,13 @@ def test_step(model, test_dataloader, device, epoch, args):
                     max_x = max(spacepoints[event_i][:, 2])
                     min_y = min(spacepoints[event_i][:, 0])
                     max_y = max(spacepoints[event_i][:, 0])
+
+                if len(pair_conversion_coords[event_i]) > 0:
+                    for coord in pair_conversion_coords[event_i]:
+                        min_x = min(min_x, coord[2])
+                        max_x = max(max_x, coord[2])
+                        min_y = min(min_y, coord[0])
+                        max_y = max(max_y, coord[0])
                 
                 x_width = max_x - min_x
                 y_width = max_y - min_y
@@ -523,8 +535,11 @@ def test_step(model, test_dataloader, device, epoch, args):
                 pred_ax.set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
                 
                 pred_ax.set_title(f'{event_type} Event {event_i} - Predicted')
-                pred_ax.set_xlabel('Z (cm)')
-                pred_ax.set_ylabel('X (cm)')
+                pred_ax.set_xlabel('Z')
+                pred_ax.set_ylabel('X')
+                pred_ax.set_xticks([])
+                pred_ax.set_yticks([])
+
                 pred_ax.text(0.95, 0.05, f"Pred Signal Prob: {event_predictions[event_i]:.2f}", 
                             transform=pred_ax.transAxes, ha='right', va='bottom', fontsize=10)
                 
@@ -535,7 +550,7 @@ def test_step(model, test_dataloader, device, epoch, args):
                     if true_label == 0:
                         true_colors.append('green')
                     elif true_label == 1:
-                        true_colors.append('lightgreen')
+                        true_colors.append('lawngreen')
                     elif true_label == 2:
                         true_colors.append('brown')
                     else:
@@ -555,8 +570,11 @@ def test_step(model, test_dataloader, device, epoch, args):
                 true_ax.set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
                 
                 true_ax.set_title(f'{event_type} Event {event_i} - True')
-                true_ax.set_xlabel('Z (cm)')
-                true_ax.set_ylabel('X (cm)')
+                true_ax.set_xlabel('Z')
+                true_ax.set_ylabel('X')
+                true_ax.set_xticks([])
+                true_ax.set_yticks([])
+                
                 true_ax.text(0.95, 0.05, f"True Signal: {event_true_labels[event_i]}", 
                             transform=true_ax.transAxes, ha='right', va='bottom', fontsize=10)
                 
@@ -617,15 +635,14 @@ def test_step(model, test_dataloader, device, epoch, args):
 
 if __name__ == "__main__":
 
-    # Record start time
     start_time = datetime.now()
 
     parser = argparse.ArgumentParser(description="Train spacepoint SSV neural network.")
-    parser.add_argument('-f', '--input_file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/more_points.pkl')
+    parser.add_argument('-f', '--input_file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/downsampled_spacepoints.pkl')
     parser.add_argument('-o', '--outdir', type=str, required=False, help='Path to directory to save logs and checkpoints.', default=f"training_files/{datetime.now().strftime("%Y_%m_%d-%H:%M:%S")}")
     parser.add_argument('-n', '--num_events', type=int, required=False, help='Number of training events to use.')
     parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.75)
-    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=32000)
+    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=100_000)
     parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=50)
     parser.add_argument('-w', '--num_workers', type=int, required=False, help='Number of worker processes for data loading.', default=0)
     parser.add_argument('-ns', '--no_save', action='store_true', required=False, help='Do not save checkpoints.')
@@ -638,13 +655,14 @@ if __name__ == "__main__":
 
     parser.add_argument('--event_loss_weight', type=float, required=False, help='Weight of event loss.', default=1.0)
 
-    parser.add_argument('--model_settings', type=str, required=False, help='Model settings.', default={'type': 'MultiTaskPointTransformerV3', 'grid_size': 2})
+    parser.add_argument('--model_settings', type=str, required=False, help='Model settings.', default={'type': 'MultiTaskPointTransformerV3', 'grid_size': 0.01})
 
     parser.add_argument('-lr', '--learning_rate', type=float, required=False, help='Learning rate for training.', default=1e-3)
     parser.add_argument('--weight_decay', type=float, required=False, help='Weight decay for training.', default=1e-2)
     parser.add_argument('--scheduler_settings', type=str, required=False, help='Scheduler type settings.', default={'type': 'CosineAnnealingLR'})
 
     parser.add_argument('--spacepoints_type', type=str, required=False, help='Type of spacepoints, either all_points, only_photons, or only_neutrinos.', default='all_points')
+    parser.add_argument('--with_charge', action='store_true', required=False, help='Whether to use charge information.')
 
     args = parser.parse_args()
 
@@ -693,6 +711,7 @@ if __name__ == "__main__":
         'weight_decay': args.weight_decay,
 
         'spacepoints_type': args.spacepoints_type,
+        'with_charge': args.with_charge,
         
         # System information
         'pytorch_version': torch.__version__,
@@ -737,6 +756,7 @@ if __name__ == "__main__":
         out_dir=args.outdir,
         no_save=args.no_save,
         spacepoints_type=args.spacepoints_type,
+        with_charge=args.with_charge,
         rng=rng,
     )
     
@@ -749,12 +769,17 @@ if __name__ == "__main__":
     # Determine number of classes from the data
     num_point_classes = 4
     num_event_classes = 2
+
+    if args.with_charge:
+        in_channels = 4 # xyzq
+    else:
+        in_channels = 3 # xyz
     
     model = MultiTaskPointTransformerV3(
         num_classes=4,          # true gamma 1, true gamma 2, other particles, cosmic
         num_event_classes=2,    # signal 1g, background 2g
         event_loss_weight=1.0,
-        in_channels=3,          # 3 coordinates (x, y, z)
+        in_channels=in_channels,
         enable_event_classification=True,  # Disable for now
     )
     model = model.to(device)

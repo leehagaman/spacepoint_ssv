@@ -33,7 +33,7 @@ pip install ipywidgets ipykernel awkward-pandas uproot tqdm pandas numpy matplot
 
 # To preprocess the spacepoints from a root file:
 ```
-python preprocess_spacepoints.py -f input_files/bdt_convert_superunified_bnb_ncpi0_full_spacepoints.root -n 200 -fd 0.5
+python preprocess_spacepoints.py
 ```
 
 # To run the training:
