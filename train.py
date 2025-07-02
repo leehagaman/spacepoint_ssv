@@ -169,6 +169,7 @@ def test_step(model, test_dataloader, device, epoch, args):
     # For point-level confusion matrix and point category histogram
     all_point_predictions = []
     all_point_true_labels = []
+    all_point_probabilities = []  # Store predicted probabilities for each point
 
     # for event-level score histogram
     all_event_probs = []
@@ -245,6 +246,7 @@ def test_step(model, test_dataloader, device, epoch, args):
             # Statistics for point-wise predictions
             point_features = predictions['point_features']
             point_logits = point_features.feat  # [total_points, num_classes]
+            point_probs = torch.softmax(point_logits, dim=1)  # [total_points, num_classes]
             _, predicted = torch.max(point_logits.data, 1)
             
             total_test_num_points += batch_labels.size(0)
@@ -254,16 +256,19 @@ def test_step(model, test_dataloader, device, epoch, args):
             predicted_by_event = []
             true_labels_by_event = []
             coords_by_event = []
+            probabilities_by_event = []
             
             for i in range(B):
                 event_mask = (batch_indices == i)
                 event_pred = predicted[event_mask].cpu().numpy()
                 event_true = batch_labels[event_mask].cpu().numpy()
                 event_coords = batch_coords[event_mask].cpu().numpy()
+                event_probs = point_probs[event_mask].cpu().numpy()
                 
                 predicted_by_event.append(event_pred)
                 true_labels_by_event.append(event_true)
                 coords_by_event.append(event_coords)
+                probabilities_by_event.append(event_probs)
             
             # Calculate batch-level metrics
             batch_point_accuracy = 100 * (predicted == batch_labels).sum().item() / batch_labels.size(0)
@@ -288,6 +293,7 @@ def test_step(model, test_dataloader, device, epoch, args):
             if epoch == -1 or epoch % 5 == 0 or epoch == args.num_epochs - 1:
                 all_point_predictions.extend(predicted_by_event)
                 all_point_true_labels.extend(true_labels_by_event)
+                all_point_probabilities.extend(probabilities_by_event)
 
                 event_probs = torch.softmax(predictions['event_logits'], dim=1)[:, 1].cpu().numpy()
                 all_event_probs.extend(event_probs)
@@ -353,6 +359,8 @@ def test_step(model, test_dataloader, device, epoch, args):
         point_confusion_ax.set_yticks(range(len(class_names)))
         point_confusion_ax.set_yticklabels(class_names)
         point_confusion_fig.tight_layout()
+        
+        point_confusion_fig.savefig(f'{args.outdir}/plots/point_confusion_fig.jpg', dpi=300)
 
 
         # Create event score histogram
@@ -368,6 +376,8 @@ def test_step(model, test_dataloader, device, epoch, args):
         event_score_ax.set_xlabel('Output Signal Score')
         event_score_ax.set_ylabel('Relative Number of Events')
         event_score_fig.tight_layout()
+
+        event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.jpg', dpi=300)
 
         # create efficiency curve and AUC curve
         all_signal_plus_background_probs = np.concatenate([true_signal_probs, true_background_probs])
@@ -402,6 +412,8 @@ def test_step(model, test_dataloader, device, epoch, args):
         efficiency_ax.set_ylim(0, 1)
         efficiency_fig.tight_layout()
 
+        efficiency_fig.savefig(f'{args.outdir}/plots/efficiency_fig.jpg', dpi=300)
+
         auc = 0
         for i in range(len(signal_efficiencies) - 1):
             x_width = -(signal_efficiencies[i + 1] - signal_efficiencies[i])
@@ -416,6 +428,8 @@ def test_step(model, test_dataloader, device, epoch, args):
         auc_ax.set_xlim(0, 1)
         auc_ax.set_ylim(0, 1)
         auc_fig.tight_layout()
+
+        auc_fig.savefig(f'{args.outdir}/plots/auc_fig.jpg', dpi=300)
         
         
         # Create point category histogram
@@ -461,6 +475,8 @@ def test_step(model, test_dataloader, device, epoch, args):
         point_category_ax.set_xlabel('Number of Points in Event')
         point_category_ax.set_ylabel('Relative Number of Events')
         point_category_fig.tight_layout()
+
+        point_category_fig.savefig(f'{args.outdir}/plots/point_category_fig.jpg', dpi=300)
 
 
         # Create spacepoint-level visualization
@@ -602,28 +618,70 @@ def test_step(model, test_dataloader, device, epoch, args):
                                            data=[[row["Event Type"], row["Event Index"], row["Event Plot"], 
                                                  row["Predicted Signal Probability"], 
                                                  row["True Signal Label"]] for row in spacepoint_table_data])
+
+        # Create point probability distribution plot
+        # Flatten all probabilities and labels
+        flattened_probs = []
+        flattened_labels = []
+        for event_probs, event_labels in zip(all_point_probabilities, all_point_true_labels):
+            for point_probs, point_label in zip(event_probs, event_labels):
+                flattened_probs.append(point_probs)
+                flattened_labels.append(point_label)
         
+        flattened_probs = np.array(flattened_probs)  # [total_points, num_classes]
+        flattened_labels = np.array(flattened_labels)  # [total_points]
+        
+        # Create subplots for each class
+        class_names = ['Gamma1', 'Gamma2', 'Other', 'Cosmic']
+        num_classes = len(class_names)
+        
+        point_prob_fig, point_prob_axes = plt.subplots(2, 2, figsize=(12, 10))
+        point_prob_axes = point_prob_axes.flatten()
+        
+        bins = np.linspace(0, 1, 51)
+        
+        for class_idx in range(num_classes):
+            ax = point_prob_axes[class_idx]
+            
+            # Get probabilities for this class
+            class_probs = flattened_probs[:, class_idx]
+            
+            # Separate by true label
+            for true_class_idx in range(num_classes):
+                mask = (flattened_labels == true_class_idx)
+                if np.sum(mask) > 0:
+                    true_class_probs = class_probs[mask]
+                    ax.hist(true_class_probs, bins=bins, histtype='step', 
+                           label=f'True {class_names[true_class_idx]}', 
+                           linewidth=2, density=True, alpha=0.8)
+            
+            ax.set_xlabel(f'Predicted Probability for {class_names[class_idx]}')
+            ax.set_ylabel('Density')
+            ax.set_title(f'Distribution of {class_names[class_idx]} Predictions')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_xlim(0, 1)
+        
+        point_prob_fig.tight_layout()
+        point_prob_fig.savefig(f'{args.outdir}/plots/point_probability_distribution.jpg', dpi=300)
+
+        plt.close(point_confusion_fig)
+        plt.close(event_score_fig)
+        plt.close(point_category_fig)
+        plt.close(point_prob_fig)
+        plt.close(efficiency_fig)
+        plt.close(auc_fig)
+
         if args.wandb:
             wandb.log({
                 'test/point_confusion_matrix': wandb.Image(point_confusion_fig),
                 'test/event_score_histogram': wandb.Image(event_score_fig),
                 'test/point_category_histogram': wandb.Image(point_category_fig),
+                'test/point_probability_distribution': wandb.Image(point_prob_fig),
                 'test/spacepoint_visualization_table': spacepoint_table if spacepoint_table_data else None,
                 'test/efficiency_curve': wandb.Image(efficiency_fig),
                 'test/auc_curve': wandb.Image(auc_fig),
             })
-
-        point_confusion_fig.savefig(f'{args.outdir}/plots/point_confusion_fig.jpg', dpi=300)
-        event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.jpg', dpi=300)
-        point_category_fig.savefig(f'{args.outdir}/plots/point_category_fig.jpg', dpi=300)
-        efficiency_fig.savefig(f'{args.outdir}/plots/efficiency_fig.jpg', dpi=300)
-        auc_fig.savefig(f'{args.outdir}/plots/auc_fig.jpg', dpi=300)
-
-        plt.close(point_confusion_fig)
-        plt.close(event_score_fig)
-        plt.close(point_category_fig)
-        plt.close(efficiency_fig)
-        plt.close(auc_fig)
 
     loss = total_test_loss / num_test_events
     point_loss = total_test_point_loss / num_test_events
