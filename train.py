@@ -1,6 +1,8 @@
 import warnings
 # Ignore FutureWarning from timm.models.layers - must be before any timm imports
 warnings.filterwarnings("ignore", category=FutureWarning, module="timm.models.layers")
+# Ignore RuntimeWarning from numpy histogram divide operations
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in divide")
 
 from tqdm import tqdm
 import pickle
@@ -77,11 +79,11 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         # Prepare targets for loss computation
         targets = {
             'point_labels': batch_labels,
-            'event_labels': batch_event_y
+            'event_labels': batch_event_y,
         }
         
         # Compute loss using model's compute_loss method
-        losses = model.compute_loss(predictions, targets)
+        losses = model.compute_loss(predictions, targets, coord)
         total_loss = losses['total_loss']
         
         # Extract individual losses for logging
@@ -231,7 +233,7 @@ def test_step(model, test_dataloader, device, epoch, args):
             }
             
             # Compute loss using model's compute_loss method
-            losses = model.compute_loss(predictions, targets)
+            losses = model.compute_loss(predictions, targets, coord)
             total_loss = losses['total_loss']
             
             # Extract individual losses for logging
@@ -699,8 +701,8 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--input_file', type=str, required=False, help='Path to root file to pre-process.', default='intermediate_files/downsampled_spacepoints.pkl')
     parser.add_argument('-o', '--outdir', type=str, required=False, help='Path to directory to save logs and checkpoints.', default=f"training_files/{datetime.now().strftime("%Y_%m_%d-%H:%M:%S")}")
     parser.add_argument('-n', '--num_events', type=int, required=False, help='Number of training events to use.')
-    parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.75)
-    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=100_000)
+    parser.add_argument('-tf', '--train_fraction', type=float, required=False, help='Fraction of training events to use.', default=0.9)
+    parser.add_argument('-b', '--batch_size', type=int, required=False, help='Batch size for training.', default=5_000)
     parser.add_argument('-e', '--num_epochs', type=int, required=False, help='Number of epochs to train for.', default=50)
     parser.add_argument('-w', '--num_workers', type=int, required=False, help='Number of worker processes for data loading.', default=0)
     parser.add_argument('-ns', '--no_save', action='store_true', required=False, help='Do not save checkpoints.')
@@ -719,8 +721,15 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, required=False, help='Weight decay for training.', default=1e-2)
     parser.add_argument('--scheduler_settings', type=str, required=False, help='Scheduler type settings.', default={'type': 'CosineAnnealingLR'})
 
-    parser.add_argument('--spacepoints_type', type=str, required=False, help='Type of spacepoints, either all_points, only_photons, or only_neutrinos.', default='all_points')
+    parser.add_argument('--spacepoints_type', type=str, required=False, help='Type of spacepoints, either all_points, only_photons, only_neutrinos, or only_two_photons.', default='all_points')
     parser.add_argument('--with_charge', action='store_true', required=False, help='Whether to use charge information.')
+
+    parser.add_argument('--gamma_separation_loss_weight', type=float, required=False, help='Weight of gamma separation loss.', default=0)
+    parser.add_argument('--gamma_KL_loss_weight', type=float, required=False, help='Weight of gamma KL loss.', default=0)
+    parser.add_argument('--entropy_loss_weight', type=float, required=False, help='Weight of entropy loss.', default=0)
+    parser.add_argument('--variance_loss_weight', type=float, required=False, help='Weight of variance loss.', default=0)
+    parser.add_argument('--near_05_loss_weight', type=float, required=False, help='Weight of near 0.5 loss.', default=0)
+    parser.add_argument('--gamma_one_side_loss_weight', type=float, required=False, help='Weight of gamma one side loss.', default=0)
 
     args = parser.parse_args()
 
@@ -770,7 +779,13 @@ if __name__ == "__main__":
 
         'spacepoints_type': args.spacepoints_type,
         'with_charge': args.with_charge,
-        
+
+        'gamma_separation_loss_weight': args.gamma_separation_loss_weight,
+        'gamma_KL_loss_weight': args.gamma_KL_loss_weight,
+        'entropy_loss_weight': args.entropy_loss_weight,
+        'variance_loss_weight': args.variance_loss_weight,
+        'near_05_loss_weight': args.near_05_loss_weight,
+        'gamma_one_side_loss_weight': args.gamma_one_side_loss_weight,
         # System information
         'pytorch_version': torch.__version__,
         'device': str(device),
@@ -838,7 +853,12 @@ if __name__ == "__main__":
         num_event_classes=2,    # signal 1g, background 2g
         event_loss_weight=1.0,
         in_channels=in_channels,
-        enable_event_classification=True,  # Disable for now
+        gamma_separation_loss_weight=args.gamma_separation_loss_weight,
+        gamma_KL_loss_weight=args.gamma_KL_loss_weight,
+        entropy_loss_weight=args.entropy_loss_weight,
+        variance_loss_weight=args.variance_loss_weight,
+        near_05_loss_weight=args.near_05_loss_weight,
+        gamma_one_side_loss_weight=args.gamma_one_side_loss_weight,
     )
     model = model.to(device)
     

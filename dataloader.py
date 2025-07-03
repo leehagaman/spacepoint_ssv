@@ -25,6 +25,7 @@ class SpacepointDataset(Dataset):
                 'all_points': Use all points
                 'only_photons': Use only photons
                 'only_neutrinos': Use only neutrinos
+                'only_two_photons': Use only two photons (effectively training point weight but not event classification)
             with_charge: Whether to include charge information
             rng: Random number generator
         """
@@ -140,12 +141,12 @@ class SpacepointDataset(Dataset):
 
         if self.spacepoints_type == "all_points":
             enough_spacepoints_mask = total_num_spacepoints_per_event > 0
-        elif self.spacepoints_type == "only_photons":
+        elif self.spacepoints_type == "only_photons" or self.spacepoints_type == "only_two_photons":
             enough_spacepoints_mask = only_photons_num_spacepoints_per_event > 0
         elif self.spacepoints_type == "only_neutrinos":
             enough_spacepoints_mask = only_neutrinos_num_spacepoints_per_event > 0
         else:
-            raise ValueError(f"Invalid training type: {self.spacepoints_type}")
+            raise ValueError(f"Invalid spacepoints type: {self.spacepoints_type}")
 
         # Require one or two true primary/pi0 gammas pair converting in the final volume
         sig_mask = self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1
@@ -154,6 +155,10 @@ class SpacepointDataset(Dataset):
         #print("event_indices_with_no_true_gamma_pairconvert_in_FV:", np.where(~sig_mask & ~bkg_mask)[0])
 
         process_mask = enough_spacepoints_mask & (sig_mask | bkg_mask)
+
+        if self.spacepoints_type == "only_two_photons":
+            process_mask = enough_spacepoints_mask & bkg_mask
+
         process_indices = np.where(process_mask)[0]
 
         self.true_gamma_info_df = self.true_gamma_info_df.iloc[process_indices].reset_index(drop=True)
@@ -185,7 +190,7 @@ class SpacepointDataset(Dataset):
 
         if self.spacepoints_type == "all_points":
             pass
-        elif self.spacepoints_type == "only_photons":
+        elif self.spacepoints_type == "only_photons" or self.spacepoints_type == "only_two_photons":
             if self.with_charge:
                 self.real_other_particles_downsampled_spacepoints_maybe_with_charge = [np.empty((0, 4)) for i in range(len(self.real_other_particles_downsampled_spacepoints_maybe_with_charge))]
                 self.real_cosmic_downsampled_spacepoints_maybe_with_charge = [np.empty((0, 4)) for i in range(len(self.real_cosmic_downsampled_spacepoints_maybe_with_charge))]
@@ -198,7 +203,7 @@ class SpacepointDataset(Dataset):
             else:
                 self.real_other_particles_downsampled_spacepoints_maybe_with_charge = [np.empty((0, 3)) for i in range(len(self.real_other_particles_downsampled_spacepoints_maybe_with_charge))]
         else:
-            raise ValueError(f"Invalid training type: {self.spacepoints_type}")
+            raise ValueError(f"Invalid spacepoints type: {self.spacepoints_type}")
         
         print("Shuffling event ordering")
         shuffled_indices = torch.randperm(self.num_events, generator=self.rng)
@@ -436,6 +441,7 @@ def create_dataloaders(pickle_file,
             'all_points': Use all points
             'only_photons': Use only photons
             'only_neutrinos': Use only neutrinos
+            'only_two_photons': Use only two photons (effectively training point weight but not event classification)
         with_charge: Whether to include charge information
         rng: Random number generator
         
