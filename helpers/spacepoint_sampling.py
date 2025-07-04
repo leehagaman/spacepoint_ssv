@@ -101,9 +101,13 @@ def get_min_dists(points_A, points_B):
     Get the minimum distance between each point in points_A and all the points in points_B.
     """
 
-    if len(points_A) == 0 or len(points_B) == 0:
+    if len(points_B) == 0: # no nearby points to measure to, return array of infs
+        return np.full((len(points_A), 1), 999999.)
+    
+    if len(points_A) == 0: # no points to measure from, return empty array
         return np.array([])
 
+    # if there are points to measure from and to be nearby, do the thing
     nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(points_B)
     distances, _ = nbrs.kneighbors(points_A)
     return distances

@@ -110,6 +110,14 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices, rng=None):
         # should be 100% for pair production, but compton scatters can also effectively cause the start of a shower
         # daughter particles could disappear from the geant tree even if it pair converts, that type of photon won't be included here
 
+        # Create a mapping from photon ID to its position in the energy list
+        photon_id_to_position = {photon_id: pos for pos, photon_id in enumerate(primary_or_pi0_gamma_ids)}
+        
+        # Initialize conversion point lists with None values
+        curr_true_gamma_pairconversion_xs = [None] * len(primary_or_pi0_gamma_ids)
+        curr_true_gamma_pairconversion_ys = [None] * len(primary_or_pi0_gamma_ids)
+        curr_true_gamma_pairconversion_zs = [None] * len(primary_or_pi0_gamma_ids)
+        
         # looking for pair conversion points, allowing for the possibility of Compton scattering
         for i in range(num_particles):
             if wc_geant_dic["truth_id"][event_i][i] in primary_or_pi0_gamma_ids: # pi0/primary -> gamma, this won't include the manually deleted photon
@@ -156,19 +164,27 @@ def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices, rng=None):
                     #print(f"weird event, no daughter photon, but also deposited less than half the energy: {cumulative_deposited_energy} / {original_gamma_energy}")
                     pass
                 else:
-
-                    curr_true_gamma_pairconversion_xs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][0])
-                    curr_true_gamma_pairconversion_ys.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][1])
-                    curr_true_gamma_pairconversion_zs.append(wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][2])
+                    # Store conversion point in the correct position based on photon ID
+                    photon_id = wc_geant_dic["truth_id"][event_i][i]
+                    position = photon_id_to_position[photon_id]
+                    
+                    curr_true_gamma_pairconversion_xs[position] = wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][0]
+                    curr_true_gamma_pairconversion_ys[position] = wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][1]
+                    curr_true_gamma_pairconversion_zs[position] = wc_geant_dic["truth_startXYZT"][event_i][descendants_indices[0]][2]
                     curr_true_num_gamma_pairconvert += 1
 
-                    if -1 < curr_true_gamma_pairconversion_xs[-1] <= 254.3 and -115.0 < curr_true_gamma_pairconversion_ys[-1] <= 117.0 and 0.6 < curr_true_gamma_pairconversion_zs[-1] <= 1036.4:
+                    if -1 < curr_true_gamma_pairconversion_xs[position] <= 254.3 and -115.0 < curr_true_gamma_pairconversion_ys[position] <= 117.0 and 0.6 < curr_true_gamma_pairconversion_zs[position] <= 1036.4:
                         curr_true_num_gamma_pairconvert_in_FV += 1
 
                         if original_gamma_energy > 0.02:
                             curr_true_num_gamma_pairconvert_in_FV_20_MeV += 1
 
 
+        # Filter out None values from conversion point lists
+        curr_true_gamma_pairconversion_xs = [x for x in curr_true_gamma_pairconversion_xs if x is not None]
+        curr_true_gamma_pairconversion_ys = [y for y in curr_true_gamma_pairconversion_ys if y is not None]
+        curr_true_gamma_pairconversion_zs = [z for z in curr_true_gamma_pairconversion_zs if z is not None]
+        
         true_num_gamma.append(curr_true_num_gamma)
         true_gamma_energies.append(curr_true_gamma_energies)
         true_gamma_pairconversion_xs.append(curr_true_gamma_pairconversion_xs)
@@ -237,17 +253,27 @@ def get_geant_points(f, num_events=None, num_interpolated_points=5, deleted_gamm
             delete_gamma_here = event_i in deleted_gamma_indices
 
         # finding the daughters of the primary pi0
+        daughters_of_primary_pi0_indices = []
         daughters_of_primary_pi0_ids = []
         daughters_of_primary_pi0_pdgs = []
-
+        deleted_photon_pf_index = None
         for i in range(len(wc_geant_dic["truth_id"][event_i])):
 
             if wc_geant_dic["truth_mother"][event_i][i] == primary_pi0_id:
+                daughters_of_primary_pi0_indices.append(i)
                 daughters_of_primary_pi0_ids.append(wc_geant_dic["truth_id"][event_i][i])
                 daughters_of_primary_pi0_pdgs.append(wc_geant_dic["truth_pdg"][event_i][i])
 
                 if delete_gamma_here and deleted_gamma_pf_indices[event_i] == i: # this is the manually deleted photon
-                    curr_deleted_photon_type = len(daughters_of_primary_pi0_pdgs) # sets this as either 1 or 2, for gamma1 or gamma2
+                    deleted_photon_pf_index = i
+
+        if deleted_photon_pf_index is not None:
+            all_photon_energies = [wc_geant_dic["truth_startMomentum"][event_i][i][3] for i in daughters_of_primary_pi0_indices]
+            deleted_photon_energy = wc_geant_dic["truth_startMomentum"][event_i][deleted_photon_pf_index][3]
+            if deleted_photon_energy == np.max(all_photon_energies):
+                curr_deleted_photon_type = 1 # deleted the highest energy photon
+            else:
+                curr_deleted_photon_type = 2 # deleted the second highest energy photon (or lower, but then will get overridden below)
 
         if not (len(daughters_of_primary_pi0_pdgs) == 2 and daughters_of_primary_pi0_pdgs[0] == 22 and daughters_of_primary_pi0_pdgs[1] == 22):
             # either rare decay, or one photon was lost from the Geant tree, skip this event
@@ -257,8 +283,26 @@ def get_geant_points(f, num_events=None, num_interpolated_points=5, deleted_gamm
             deleted_photon_types.append(0)
             continue
 
-        # finding all descendants of the first daughter of the primary pi0
-        first_daughter_and_descendants_ids = [daughters_of_primary_pi0_ids[0]]
+        highest_energy_daughter_index = None
+        second_highest_energy_daughter_index = None
+        highest_energy_daughter_energy = 0
+        second_highest_energy_daughter_energy = 0
+        for primary_pi0_daughter_local_index in range(len(daughters_of_primary_pi0_indices)):
+            primary_pi0_daughter_global_index = daughters_of_primary_pi0_indices[primary_pi0_daughter_local_index]
+            if daughters_of_primary_pi0_pdgs[primary_pi0_daughter_local_index] != 22: # not a photon, skip
+                continue
+            curr_energy = wc_geant_dic["truth_startMomentum"][event_i][primary_pi0_daughter_global_index][3]
+            if curr_energy > highest_energy_daughter_energy:
+                second_highest_energy_daughter_index = highest_energy_daughter_index
+                second_highest_energy_daughter_energy = highest_energy_daughter_energy
+                highest_energy_daughter_index = primary_pi0_daughter_local_index
+                highest_energy_daughter_energy = curr_energy
+            elif curr_energy > second_highest_energy_daughter_energy:
+                second_highest_energy_daughter_index = primary_pi0_daughter_local_index
+                second_highest_energy_daughter_energy = curr_energy
+
+        # finding all descendants of the highest energy photon daughter of the primary pi0
+        first_daughter_and_descendants_ids = [daughters_of_primary_pi0_ids[highest_energy_daughter_index]]
         first_daughter_descendants_pdgs = []
         first_daughter_descendants_energies = []
         first_daughter_descendants_start_xs = []
@@ -283,8 +327,8 @@ def get_geant_points(f, num_events=None, num_interpolated_points=5, deleted_gamm
                     first_daughter_descendants_end_zs.append(wc_geant_dic["truth_endXYZT"][event_i][i][2])
                     num_added += 1
 
-        # finding the descendants of the second daughter of the primary pi0
-        second_daughter_and_descendants_ids = [daughters_of_primary_pi0_ids[1]]
+        # finding the descendants of the second highest energy photon daughter of the primary pi0
+        second_daughter_and_descendants_ids = [daughters_of_primary_pi0_ids[second_highest_energy_daughter_index]]
         second_daughter_descendants_pdgs = []
         second_daughter_descendants_energies = []
         second_daughter_descendants_start_xs = []
@@ -448,6 +492,7 @@ def load_spacepoints_chunk(f, start_idx, end_idx):
     return Tcluster_spacepoints_with_charge, Trec_spacepoints, TrueEDep_spacepoints, TrueEDep_spacepoints_edep
 
 def categorize_true_EDeps(TrueEDep_spacepoints, TrueEDep_spacepoints_edep, true_gamma_1_geant_points, true_gamma_2_geant_points, other_particles_geant_points, num_events):
+
     # we don't delete a photon here, we do that as part of the downsampling step later
 
     # Split TrueEDep_spacepoints into gamma1, gamma2 and other particles
@@ -713,8 +758,11 @@ def process_chunk(chunk_data):
     for event_i in range(chunk_num_events):
         if chunk_deleted_photon_types[event_i] == 1:
             chunk_downsampled_deleted_gamma_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
-            chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(np.empty((0, 3)))
-            chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
+
+            # renaming the remaining photon from gamma2 to gamma1, we want all true one-gamma events to have only gamma1 spacepoints
+            chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
+            chunk_downsampled_remaining_true_gamma2_EDep_spacepoints.append(np.empty((0, 3)))
+
         elif chunk_deleted_photon_types[event_i] == 2:
             chunk_downsampled_deleted_gamma_EDep_spacepoints.append(chunk_downsampled_true_gamma2_EDep_spacepoints[event_i])
             chunk_downsampled_remaining_true_gamma1_EDep_spacepoints.append(chunk_downsampled_true_gamma1_EDep_spacepoints[event_i])
