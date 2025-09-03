@@ -22,9 +22,10 @@ from models.my_PointTransformer_model import MultiTaskPointTransformerV3
 
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
+from scipy.spatial.transform import Rotation as R
 
 
-def train_step(model, train_dataloader, optimizer, device, epoch, args):
+def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None):
 
     model.train()
 
@@ -58,11 +59,36 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args):
         
         optimizer.zero_grad()
 
-        if batch_features.shape[1] == 4: # including charge
-            batch_coords = batch_features[:, :3]
-        else:
-            batch_coords = batch_features
-        
+
+        # Apply random rotation if enabled
+        if args.train_random_rotation:
+            # Generate uniform random quaternion using the same RNG
+            u1 = torch.rand(1, generator=rng).item()
+            u2 = torch.rand(1, generator=rng).item()
+            u3 = torch.rand(1, generator=rng).item()
+            
+            q = [
+                np.sqrt(1 - u1) * np.sin(2 * np.pi * u2),
+                np.sqrt(1 - u1) * np.cos(2 * np.pi * u2),
+                np.sqrt(u1) * np.sin(2 * np.pi * u3),
+                np.sqrt(u1) * np.cos(2 * np.pi * u3),
+            ]
+            
+            # Create rotation object and get rotation matrix
+            rot = R.from_quat(q)
+            rotation_matrix = torch.tensor(rot.as_matrix(), dtype=torch.float32, device=device)
+            
+            # Apply rotation to coordinates
+            if batch_features.shape[1] == 4: # including charge
+                batch_coords = batch_features[:, :3]
+                batch_charges = batch_features[:, 3]
+                
+                batch_coords = batch_coords @ rotation_matrix.T
+                batch_features = torch.cat([batch_coords, batch_charges], dim=1)
+            else:
+                batch_features = batch_features @ rotation_matrix.T
+                batch_coords = batch_features[:, :3]
+            
         coord = batch_coords.contiguous()
         feat = batch_features.contiguous()
         
@@ -558,8 +584,7 @@ def test_step(model, test_dataloader, device, epoch, args):
                 pred_ax.set_xticks([])
                 pred_ax.set_yticks([])
 
-                pred_ax.text(0.95, 0.05, f"Pred Signal Prob: {event_predictions[event_i]:.2f}", 
-                            transform=pred_ax.transAxes, ha='right', va='bottom', fontsize=10)
+                pred_ax.text(0.95, 0.05, f"Pred Signal Prob: {event_predictions[event_i]:.2f}", transform=pred_ax.transAxes, ha='right', va='bottom', fontsize=10)
                 
                 # Create true plot (right subplot)
                 true_colors = []
@@ -574,15 +599,12 @@ def test_step(model, test_dataloader, device, epoch, args):
                     else:
                         true_colors.append('blue')
                 
-                true_ax.scatter(spacepoints[event_i][:, 2], 
-                               spacepoints[event_i][:, 0], 
-                               s=s, c=true_colors)
+                true_ax.scatter(spacepoints[event_i][:, 2], spacepoints[event_i][:, 0], s=s, c=true_colors)
                 
                 # Plot pair conversion points as red stars
                 pair_x = [coord[2] for coord in pair_conversion_coords[event_i]]
                 pair_y = [coord[0] for coord in pair_conversion_coords[event_i]]
-                true_ax.scatter(pair_x, pair_y, 
-                               s=50, c='red', marker='*', edgecolors='black', linewidth=0.5)
+                true_ax.scatter(pair_x, pair_y, s=50, c='red', marker='*', edgecolors='black', linewidth=0.5)
                 
                 true_ax.set_xlim(min_x - extra_scale_factor * x_width, max_x + extra_scale_factor * x_width)
                 true_ax.set_ylim(min_y - extra_scale_factor * y_width, max_y + extra_scale_factor * y_width)
@@ -724,12 +746,15 @@ if __name__ == "__main__":
     parser.add_argument('--spacepoints_type', type=str, required=False, help='Type of spacepoints, either all_points, only_photons, only_neutrinos, or only_two_photons.', default='all_points')
     parser.add_argument('--with_charge', action='store_true', required=False, help='Whether to use charge information.')
 
+    parser.add_argument('--permutation_gamma_loss', action='store_true', required=False, help='Use loss function that is the minimum over swapping gamma 1 and 2 labels.')
+
     parser.add_argument('--gamma_separation_loss_weight', type=float, required=False, help='Weight of gamma separation loss.', default=0)
     parser.add_argument('--gamma_KL_loss_weight', type=float, required=False, help='Weight of gamma KL loss.', default=0)
     parser.add_argument('--entropy_loss_weight', type=float, required=False, help='Weight of entropy loss.', default=0)
     parser.add_argument('--variance_loss_weight', type=float, required=False, help='Weight of variance loss.', default=0)
     parser.add_argument('--near_05_loss_weight', type=float, required=False, help='Weight of near 0.5 loss.', default=0)
     parser.add_argument('--gamma_one_side_loss_weight', type=float, required=False, help='Weight of gamma one side loss.', default=0)
+    parser.add_argument('--train_random_rotation', action='store_true', required=False, help='Apply random 3D rotations to training data for data augmentation.')
 
     args = parser.parse_args()
 
@@ -773,19 +798,21 @@ if __name__ == "__main__":
         'model_settings': args.model_settings,
         'scheduler_settings': args.scheduler_settings,
         'event_loss_weight': args.event_loss_weight,
-
-        'learning_rate': args.learning_rate,
-        'weight_decay': args.weight_decay,
-
-        'spacepoints_type': args.spacepoints_type,
-        'with_charge': args.with_charge,
-
+        'permutation_gamma_loss': args.permutation_gamma_loss,
         'gamma_separation_loss_weight': args.gamma_separation_loss_weight,
         'gamma_KL_loss_weight': args.gamma_KL_loss_weight,
         'entropy_loss_weight': args.entropy_loss_weight,
         'variance_loss_weight': args.variance_loss_weight,
         'near_05_loss_weight': args.near_05_loss_weight,
         'gamma_one_side_loss_weight': args.gamma_one_side_loss_weight,
+
+        'learning_rate': args.learning_rate,
+        'weight_decay': args.weight_decay,
+
+        'spacepoints_type': args.spacepoints_type,
+        'with_charge': args.with_charge,
+        'train_random_rotation': args.train_random_rotation,
+
         # System information
         'pytorch_version': torch.__version__,
         'device': str(device),
@@ -853,6 +880,7 @@ if __name__ == "__main__":
         num_event_classes=2,    # signal 1g, background 2g
         event_loss_weight=1.0,
         in_channels=in_channels,
+        permutation_gamma_loss=args.permutation_gamma_loss,
         gamma_separation_loss_weight=args.gamma_separation_loss_weight,
         gamma_KL_loss_weight=args.gamma_KL_loss_weight,
         entropy_loss_weight=args.entropy_loss_weight,
@@ -907,7 +935,7 @@ if __name__ == "__main__":
             # train and test should be the same for the inital random network before any training happens
             train_loss, train_point_loss, train_event_loss, train_point_accuracy = test_loss, test_point_loss, test_event_loss, test_point_accuracy
         else:
-            train_loss, train_point_loss, train_event_loss, train_point_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args)
+            train_loss, train_point_loss, train_event_loss, train_point_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args, rng)
             test_loss, test_point_loss, test_event_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
 
         if test_loss < best_test_loss: # save the best model

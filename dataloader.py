@@ -191,6 +191,7 @@ class SpacepointDataset(Dataset):
         if self.spacepoints_type == "all_points":
             pass
         elif self.spacepoints_type == "only_photons" or self.spacepoints_type == "only_two_photons":
+            print("using only photons or two photons")
             if self.with_charge:
                 self.real_other_particles_downsampled_spacepoints_maybe_with_charge = [np.empty((0, 4)) for i in range(len(self.real_other_particles_downsampled_spacepoints_maybe_with_charge))]
                 self.real_cosmic_downsampled_spacepoints_maybe_with_charge = [np.empty((0, 4)) for i in range(len(self.real_cosmic_downsampled_spacepoints_maybe_with_charge))]

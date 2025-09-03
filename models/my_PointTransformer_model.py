@@ -42,12 +42,13 @@ class EventCategorizationHead(nn.Module):
 
 class MultiTaskPointTransformerV3(PointTransformerV3):
     def __init__(self, num_event_classes=10, event_hidden_channels=[512, 256], event_dropout=0.5, 
-                 event_loss_weight=1, gamma_separation_loss_weight=0, gamma_KL_loss_weight=0, 
+                 event_loss_weight=1, permutation_gamma_loss=False, gamma_separation_loss_weight=0, gamma_KL_loss_weight=0, 
                  entropy_loss_weight=0.1, variance_loss_weight=0.1, near_05_loss_weight=0.1, gamma_one_side_loss_weight=0, **kwargs):
         self.num_point_classes = kwargs.pop('num_classes', 4)
         super().__init__(**kwargs)
 
         self.event_loss_weight = event_loss_weight
+        self.permutation_gamma_loss = permutation_gamma_loss
         self.gamma_separation_loss_weight = gamma_separation_loss_weight
         self.gamma_KL_loss_weight = gamma_KL_loss_weight
         self.entropy_loss_weight = entropy_loss_weight
@@ -96,15 +97,15 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         point_labels = targets['point_labels']
         point_loss = nn.CrossEntropyLoss()(point_logits, point_labels)
 
-        swapped_point_labels = point_labels.clone()
-        mask_gamma1 = (point_labels == 0)
-        mask_gamma2 = (point_labels == 1)
-        swapped_point_labels[mask_gamma1] = 1
-        swapped_point_labels[mask_gamma2] = 0
-        swapped_point_loss = nn.CrossEntropyLoss()(point_logits, swapped_point_labels)
-
-        # don't care if gamma1 and gamma2 points are swapped, we just want to separate them into two categories
-        point_loss = torch.min(point_loss, swapped_point_loss)
+        if self.permutation_gamma_loss:
+            # this is the loss function that is the minimum over swapping gamma 1 and 2 labels
+            # don't care if gamma1 and gamma2 points are swapped, we just want to separate them into two categories
+            swapped_point_labels = point_labels.clone()
+            swapped_point_labels[point_labels == 0] = 1
+            swapped_point_labels[point_labels == 1] = 0
+            swapped_point_loss = nn.CrossEntropyLoss()(point_logits, swapped_point_labels)
+            point_loss = torch.min(point_loss, swapped_point_loss)
+        
         losses['point_loss'] = point_loss
 
         event_loss = nn.CrossEntropyLoss()(predictions['event_logits'], targets['event_labels'])
