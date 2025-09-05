@@ -24,6 +24,7 @@ import pandas as pd
 import multiprocessing as mp
 
 from helpers.spacepoint_sampling import fps_clustering_downsample, get_min_dists, energy_weighted_density_sampling
+import math
 
 def get_vtx_and_true_gamma_info(f, num_events, deleted_gamma_indices, rng=None):
 
@@ -702,6 +703,37 @@ def categorize_downsampled_reco_spacepoints(downsampled_Tcluster_spacepoints_may
             real_gamma1_downsampled_spacepoints, real_gamma2_downsampled_spacepoints, 
             real_other_particles_downsampled_spacepoints, real_cosmic_downsampled_spacepoints)
 
+def compute_conversion_scores(points, pair_conversion_coords, tau):
+    """
+    Compute exponential falloff conversion scores for each point.
+
+    Args:
+        points: np.ndarray of shape (N, D) where D >= 3 (xyz[ q])
+        pair_conversion_coords: list of [x, y, z] coords (may be empty)
+        tau: float, falloff length scale (same units as coords)
+
+    Returns:
+        np.ndarray of shape (N,) with scores in [0,1]
+    """
+    if len(points) == 0:
+        return np.array([])
+    if pair_conversion_coords is None or len(pair_conversion_coords) == 0:
+        return np.zeros(points.shape[0], dtype=np.float32)
+    pts = points[:, :3]
+    conv = np.asarray(pair_conversion_coords, dtype=np.float32)
+    # compute pairwise distances efficiently
+    # (N,3) vs (M,3)
+    # expand dims and use broadcasting
+    diff = pts[:, None, :] - conv[None, :, :]
+    dists = np.linalg.norm(diff, axis=2)  # (N, M)
+    min_dists = dists.min(axis=1) if dists.size > 0 else np.full(pts.shape[0], np.inf)
+    # avoid division by zero
+    tau_safe = max(float(tau), 1e-12)
+    scores = np.exp(-min_dists / tau_safe).astype(np.float32)
+    return scores
+
+
+
 def process_chunk(chunk_data):
     """
     Process a single chunk of events for multiprocessing.
@@ -716,7 +748,7 @@ def process_chunk(chunk_data):
     """
     (chunk_i, start_idx, end_idx, root_filename, true_gamma_1_geant_points, 
      true_gamma_2_geant_points, other_particles_geant_points, deleted_photon_types, 
-     reco_nu_vtx, seed) = chunk_data
+     reco_nu_vtx, pair_conversion_coords, seed, conv_tau) = chunk_data
     
     # Reopen the file in this process
     f = uproot.open(root_filename)
@@ -779,12 +811,44 @@ def process_chunk(chunk_data):
     chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma_with_charge = downsample_spacepoints(chunk_Tcluster_spacepoints_with_deleted_gamma_with_charge, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
     chunk_downsampled_Trec_spacepoints_with_deleted_gamma = downsample_spacepoints(chunk_Trec_spacepoints_with_deleted_gamma, chunk_reco_nu_vtx, rng, how="fps", num_events=chunk_num_events)
 
-    chunk_categorized_downsampled_reco_spacepoints_outputs = categorize_downsampled_reco_spacepoints(chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma_with_charge, chunk_downsampled_Trec_spacepoints_with_deleted_gamma, 
-                                                                                                chunk_downsampled_TrueEDep_spacepoints, chunk_downsampled_remaining_true_gamma1_EDep_spacepoints, 
-                                                                                                chunk_downsampled_remaining_true_gamma2_EDep_spacepoints, chunk_downsampled_other_particles_EDep_spacepoints, 
-                                                                                                num_events=chunk_num_events)
+    outputs = categorize_downsampled_reco_spacepoints(chunk_downsampled_Tcluster_spacepoints_with_deleted_gamma_with_charge, chunk_downsampled_Trec_spacepoints_with_deleted_gamma, 
+                                                            chunk_downsampled_TrueEDep_spacepoints, chunk_downsampled_remaining_true_gamma1_EDep_spacepoints, 
+                                                            chunk_downsampled_remaining_true_gamma2_EDep_spacepoints, chunk_downsampled_other_particles_EDep_spacepoints, 
+                                                            num_events=chunk_num_events)
+    
+    (chunk_downsampled_Tcluster_spacepoints_maybe_with_charge, 
+    chunk_real_nu_reco_nu_downsampled_spacepoints, chunk_real_nu_reco_cosmic_downsampled_spacepoints, 
+    chunk_real_cosmic_reco_nu_downsampled_spacepoints, chunk_real_cosmic_reco_cosmic_downsampled_spacepoints, 
+    chunk_real_gamma1_downsampled_spacepoints, chunk_real_gamma2_downsampled_spacepoints, 
+    chunk_real_other_particles_downsampled_spacepoints, chunk_real_cosmic_downsampled_spacepoints) = outputs
 
-    return chunk_categorized_downsampled_reco_spacepoints_outputs
+    # compute per-event conversion scores via ndarray-only helper
+    chunk_gamma1_pair_conversion_scores = []
+    chunk_gamma2_pair_conversion_scores = []
+    chunk_other_particles_pair_conversion_scores = []
+    chunk_cosmic_pair_conversion_scores = []
+    for local_event_i in range(chunk_num_events):
+        ev_pair_coords = pair_conversion_coords[local_event_i] if pair_conversion_coords is not None else []
+        chunk_gamma1_pair_conversion_scores.append(
+            compute_conversion_scores(chunk_real_gamma1_downsampled_spacepoints[local_event_i], ev_pair_coords, conv_tau)
+        )
+        chunk_gamma2_pair_conversion_scores.append(
+            compute_conversion_scores(chunk_real_gamma2_downsampled_spacepoints[local_event_i], ev_pair_coords, conv_tau)
+        )
+        chunk_other_particles_pair_conversion_scores.append(
+            compute_conversion_scores(chunk_real_other_particles_downsampled_spacepoints[local_event_i], ev_pair_coords, conv_tau)
+        )
+        chunk_cosmic_pair_conversion_scores.append(
+            compute_conversion_scores(chunk_real_cosmic_downsampled_spacepoints[local_event_i], ev_pair_coords, conv_tau)
+        )
+
+    return (
+        chunk_downsampled_Tcluster_spacepoints_maybe_with_charge,
+        chunk_real_nu_reco_nu_downsampled_spacepoints, chunk_real_nu_reco_cosmic_downsampled_spacepoints, 
+        chunk_real_cosmic_reco_nu_downsampled_spacepoints, chunk_real_cosmic_reco_cosmic_downsampled_spacepoints, 
+        chunk_real_gamma1_downsampled_spacepoints, chunk_real_gamma2_downsampled_spacepoints, 
+        chunk_real_other_particles_downsampled_spacepoints, chunk_real_cosmic_downsampled_spacepoints,
+        chunk_gamma1_pair_conversion_scores, chunk_gamma2_pair_conversion_scores, chunk_other_particles_pair_conversion_scores, chunk_cosmic_pair_conversion_scores)
 
 
 if __name__ == "__main__":
@@ -798,6 +862,7 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--out_file', type=str, help='Output pickle file for the downsampled spacepoints.', default="downsampled_spacepoints.pkl")
     parser.add_argument('-p', '--num_processes', type=int, help='Number of processes for multiprocessing.', default=4)
     parser.add_argument('-c', '--chunk_size', type=int, help='Number of events to process in each chunk (default: 100).', default=100)
+    parser.add_argument('--conversion_point_falloff_tau', type=float, help='Falloff length tau for conversion score (same units as coords).', default=10)
     args = parser.parse_args()
 
     # Create a random generator with the specified seed for reproducibility
@@ -843,12 +908,28 @@ if __name__ == "__main__":
     all_real_gamma2_downsampled_spacepoints = []
     all_real_other_particles_downsampled_spacepoints = []
     all_real_cosmic_downsampled_spacepoints = []
+    # per-point conversion scores matching the four categories above
+    all_real_gamma1_conversion_scores = []
+    all_real_gamma2_conversion_scores = []
+    all_real_other_particles_conversion_scores = []
+    all_real_cosmic_conversion_scores = []
 
     chunk_size = args.chunk_size
     num_chunks = (args.num_events + chunk_size - 1) // chunk_size  # Ceiling division to include remainder
     
     # Prepare chunk data for multiprocessing
     chunk_data_list = []
+    # Build per-event pair conversion coords list for all events
+    all_pair_conversion_coords = []
+    for event_idx in range(args.num_events):
+        xs = true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_xs"]
+        ys = true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_ys"]
+        zs = true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_zs"]
+        event_pair_coords = []
+        for i in range(len(xs)):
+            event_pair_coords.append([xs[i], ys[i], zs[i]])
+        all_pair_conversion_coords.append(event_pair_coords)
+
     for chunk_i in range(num_chunks):
         start_idx = chunk_i * chunk_size
         end_idx = min(start_idx + chunk_size, args.num_events)
@@ -860,10 +941,13 @@ if __name__ == "__main__":
         chunk_deleted_photon_types = deleted_photon_types[start_idx:end_idx]
         chunk_reco_nu_vtx = reco_nu_vtx[start_idx:end_idx]
         
+        # Slice pair conversion coords for this chunk
+        chunk_pair_conversion_coords = all_pair_conversion_coords[start_idx:end_idx]
+
         chunk_data = (chunk_i, start_idx, end_idx, root_filename, 
                       chunk_true_gamma_1_geant_points, chunk_true_gamma_2_geant_points, 
                       chunk_other_particles_geant_points, chunk_deleted_photon_types, 
-                      chunk_reco_nu_vtx, args.seed)
+                      chunk_reco_nu_vtx, chunk_pair_conversion_coords, args.seed, args.conversion_point_falloff_tau)
         chunk_data_list.append(chunk_data)
     
     # Use multiprocessing to process chunks in parallel
@@ -901,6 +985,10 @@ if __name__ == "__main__":
         chunk_real_gamma2_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[6]
         chunk_real_other_particles_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[7]
         chunk_real_cosmic_downsampled_spacepoints = chunk_categorized_downsampled_reco_spacepoints_outputs[8]
+        chunk_real_gamma1_conversion_scores = chunk_categorized_downsampled_reco_spacepoints_outputs[9]
+        chunk_real_gamma2_conversion_scores = chunk_categorized_downsampled_reco_spacepoints_outputs[10]
+        chunk_real_other_particles_conversion_scores = chunk_categorized_downsampled_reco_spacepoints_outputs[11]
+        chunk_real_cosmic_conversion_scores = chunk_categorized_downsampled_reco_spacepoints_outputs[12]
 
         all_downsampled_Tcluster_spacepoints_with_charge.extend(chunk_downsampled_Tcluster_spacepoints_with_charge)
         all_real_nu_reco_nu_downsampled_spacepoints.extend(chunk_real_nu_reco_nu_downsampled_spacepoints)
@@ -911,6 +999,10 @@ if __name__ == "__main__":
         all_real_gamma2_downsampled_spacepoints.extend(chunk_real_gamma2_downsampled_spacepoints)
         all_real_other_particles_downsampled_spacepoints.extend(chunk_real_other_particles_downsampled_spacepoints)
         all_real_cosmic_downsampled_spacepoints.extend(chunk_real_cosmic_downsampled_spacepoints)
+        all_real_gamma1_conversion_scores.extend(chunk_real_gamma1_conversion_scores)
+        all_real_gamma2_conversion_scores.extend(chunk_real_gamma2_conversion_scores)
+        all_real_other_particles_conversion_scores.extend(chunk_real_other_particles_conversion_scores)
+        all_real_cosmic_conversion_scores.extend(chunk_real_cosmic_conversion_scores)
         
     if not args.no_save:
         print("saving downsampled spacepoints to pickle file")
@@ -920,7 +1012,9 @@ if __name__ == "__main__":
                          all_real_nu_reco_nu_downsampled_spacepoints, all_real_nu_reco_cosmic_downsampled_spacepoints,
                          all_real_cosmic_reco_nu_downsampled_spacepoints, all_real_cosmic_reco_cosmic_downsampled_spacepoints,
                          all_real_gamma1_downsampled_spacepoints, all_real_gamma2_downsampled_spacepoints, 
-                         all_real_other_particles_downsampled_spacepoints, all_real_cosmic_downsampled_spacepoints), f)
+                         all_real_other_particles_downsampled_spacepoints, all_real_cosmic_downsampled_spacepoints,
+                         all_real_gamma1_conversion_scores, all_real_gamma2_conversion_scores,
+                         all_real_other_particles_conversion_scores, all_real_cosmic_conversion_scores), f)
 
         print("finished saving")
     

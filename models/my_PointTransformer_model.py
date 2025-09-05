@@ -43,7 +43,8 @@ class EventCategorizationHead(nn.Module):
 class MultiTaskPointTransformerV3(PointTransformerV3):
     def __init__(self, num_event_classes=10, event_hidden_channels=[512, 256], event_dropout=0.5, 
                  event_loss_weight=1, permutation_gamma_loss=False, gamma_separation_loss_weight=0, gamma_KL_loss_weight=0, 
-                 entropy_loss_weight=0.1, variance_loss_weight=0.1, near_05_loss_weight=0.1, gamma_one_side_loss_weight=0, **kwargs):
+                 entropy_loss_weight=0.1, variance_loss_weight=0.1, near_05_loss_weight=0.1, gamma_one_side_loss_weight=0, 
+                 conversion_point_loss_weight=0, point_category_loss_weight=1.0, **kwargs):
         self.num_point_classes = kwargs.pop('num_classes', 4)
         super().__init__(**kwargs)
 
@@ -55,10 +56,14 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
         self.variance_loss_weight = variance_loss_weight
         self.near_05_loss_weight = near_05_loss_weight
         self.gamma_one_side_loss_weight = gamma_one_side_loss_weight
+        self.conversion_point_loss_weight = conversion_point_loss_weight
         self.num_event_classes = num_event_classes
+        self.point_category_loss_weight = point_category_loss_weight
 
         final_dec_channels = kwargs.get('dec_channels', (64, 64, 128, 256))[0]
         self.point_classifier = nn.Linear(final_dec_channels, self.num_point_classes)
+        # Per-point head to predict proximity to conversion point (binary)
+        self.conversion_head = nn.Linear(final_dec_channels, 1)
 
         final_enc_channels = kwargs.get('enc_channels', (32, 64, 128, 256, 512))[-1]
         self.event_head = EventCategorizationHead(
@@ -73,10 +78,21 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
     def forward(self, data_dict):
         point_features = super().forward(data_dict)
 
-        point_logits = self.point_classifier(point_features.feat)
+        # Cache decoder features for auxiliary heads before overwriting with class logits
+        decoder_point_features = point_features.feat
+
+        point_logits = self.point_classifier(decoder_point_features)
         point_features.feat = point_logits
 
-        results = {'point_features': point_features}
+        # Conversion logits predicted from decoder features
+        conversion_logits = self.conversion_head(decoder_point_features)
+
+        results = {
+            'point_features': point_features,
+            'conversion_logits': conversion_logits,
+            # propagate grid size for use in loss (torch scalar tensor)
+            'grid_size': data_dict.get('grid_size', None)
+        }
 
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
@@ -164,21 +180,41 @@ class MultiTaskPointTransformerV3(PointTransformerV3):
 
             losses['gamma_one_side_loss'] = self.gamma_one_side_loss_weight * (gamma1_imbalance + gamma2_imbalance)
 
-        total_loss = losses.get('point_loss', 0)
+        # Conversion point proximity loss (per-point binary classification)
+        if self.conversion_point_loss_weight > 0:
+            # predictions include per-point conversion logits
+            conversion_logits = predictions['conversion_logits'].squeeze(-1)  # [total_points]
+
+            # Prefer ground-truth per-point conversion scores provided by dataloader
+            point_conversion_scores = targets['point_conversion_scores']
+            conversion_targets = point_conversion_scores.to(conversion_logits.device).to(torch.float32)
+            if conversion_targets.dim() > 1:
+                conversion_targets = conversion_targets.view(-1)
+            # Clamp to valid probability range just in case
+            conversion_targets = torch.clamp(conversion_targets, 0.0, 1.0)
+
+            bce = nn.BCEWithLogitsLoss()(conversion_logits, conversion_targets)
+            losses['conversion_point_loss'] = self.conversion_point_loss_weight * bce
+
+        total_loss = self.point_category_loss_weight * losses['point_loss']
         if 'event_loss' in losses:
-            total_loss = total_loss + self.event_loss_weight * losses['event_loss']
+            total_loss += self.event_loss_weight * losses['event_loss']
             if self.gamma_separation_loss_weight > 0:
-                total_loss = total_loss + losses['gamma_separation_loss']
+                total_loss += losses['gamma_separation_loss']
             if self.gamma_KL_loss_weight > 0:
-                total_loss = total_loss + losses['gamma_KL_loss']
+                total_loss += losses['gamma_KL_loss']
             if self.entropy_loss_weight > 0:
-                total_loss = total_loss + losses['entropy_loss']
+                total_loss += losses['entropy_loss']
             if self.variance_loss_weight > 0:
-                total_loss = total_loss + losses['variance_loss']
+                total_loss += losses['variance_loss']
             if self.near_05_loss_weight > 0:
-                total_loss = total_loss + losses['near_05_loss']
+                total_loss += losses['near_05_loss']
             if self.gamma_one_side_loss_weight > 0:
-                total_loss = total_loss + losses['gamma_one_side_loss']
+                total_loss += losses['gamma_one_side_loss']
+            if self.conversion_point_loss_weight > 0:
+                total_loss += losses['conversion_point_loss']
 
         losses['total_loss'] = total_loss
+
+        #print(f"debug! {losses['total_loss']=}, {losses['conversion_point_loss']=}")
         return losses

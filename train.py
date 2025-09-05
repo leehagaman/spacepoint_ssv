@@ -30,8 +30,9 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
     model.train()
 
     total_train_loss = 0.0
-    total_train_point_loss = 0.0
+    total_train_point_category_loss = 0.0
     total_train_event_loss = 0.0
+    total_train_conversion_point_loss = 0.0
     total_train_correct_points = 0
     total_train_num_points = 0
 
@@ -44,7 +45,7 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
     batch_point_accuracies = []
     
     train_pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Train]')
-    for batch_idx, (batch_features, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(train_pbar):
+    for batch_idx, (batch_features, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords, batch_point_conversion_scores) in enumerate(train_pbar):
         # batch_coords has shape (total_points, 3) - all points from all events concatenated
         # batch_labels has shape (total_points,) - all labels concatenated
         # batch_event_y has shape (batch_size,) - event-level labels
@@ -56,6 +57,35 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
         batch_indices = batch_indices.to(device)
         
         B = batch_event_y.size(0)  # Number of events in this batch
+
+        # Sanity checks for label ranges and batch indices to avoid CUDA gather OOB
+        if batch_labels.dtype != torch.long:
+            batch_labels = batch_labels.long()
+        if batch_event_y.dtype != torch.long:
+            batch_event_y = batch_event_y.long()
+
+        num_point_classes = getattr(model, 'num_point_classes', 4)
+        num_event_classes = getattr(model, 'num_event_classes', 2)
+
+        min_pl = int(batch_labels.min().item()) if batch_labels.numel() > 0 else 0
+        max_pl = int(batch_labels.max().item()) if batch_labels.numel() > 0 else 0
+        if min_pl < 0 or max_pl >= num_point_classes:
+            unique, counts = torch.unique(batch_labels, return_counts=True)
+            print(f"[WARN] Clamping out-of-range point labels: min={min_pl}, max={max_pl}, classes={num_point_classes}, dist={dict(zip(unique.tolist(), counts.tolist()))}")
+            batch_labels = batch_labels.clamp(0, num_point_classes - 1)
+
+        min_el = int(batch_event_y.min().item()) if batch_event_y.numel() > 0 else 0
+        max_el = int(batch_event_y.max().item()) if batch_event_y.numel() > 0 else 0
+        if min_el < 0 or max_el >= num_event_classes:
+            unique, counts = torch.unique(batch_event_y, return_counts=True)
+            print(f"[WARN] Clamping out-of-range event labels: min={min_el}, max={max_el}, classes={num_event_classes}, dist={dict(zip(unique.tolist(), counts.tolist()))}")
+            batch_event_y = batch_event_y.clamp(0, num_event_classes - 1)
+
+        if B > 0:
+            bi_min = int(batch_indices.min().item()) if batch_indices.numel() > 0 else 0
+            bi_max = int(batch_indices.max().item()) if batch_indices.numel() > 0 else 0
+            if bi_min < 0 or bi_max >= B:
+                raise RuntimeError(f"Batch indices out of range: min={bi_min}, max={bi_max}, B={B}")
         
         optimizer.zero_grad()
 
@@ -88,6 +118,12 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
             else:
                 batch_features = batch_features @ rotation_matrix.T
                 batch_coords = batch_features[:, :3]
+        else:
+            # No rotation; derive coords directly
+            if batch_features.shape[1] == 4:
+                batch_coords = batch_features[:, :3]
+            else:
+                batch_coords = batch_features
             
         coord = batch_coords.contiguous()
         feat = batch_features.contiguous()
@@ -101,11 +137,20 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
         
         # Forward pass
         predictions = model(data_dict)
+
+        # Check shapes match before computing loss
+        pred_point_count = predictions['point_features'].feat.shape[0]
+        if pred_point_count != batch_labels.shape[0]:
+            raise RuntimeError(f"Point logits/labels size mismatch: logits={pred_point_count}, labels={batch_labels.shape[0]}")
         
+        # Use precomputed per-point conversion scores from dataloader
+        point_conversion_scores = batch_point_conversion_scores.to(device)
+
         # Prepare targets for loss computation
         targets = {
             'point_labels': batch_labels,
             'event_labels': batch_event_y,
+            'point_conversion_scores': point_conversion_scores,
         }
         
         # Compute loss using model's compute_loss method
@@ -115,11 +160,13 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
         # Extract individual losses for logging
         point_loss = losses.get('point_loss', torch.tensor(0.0, device=device))
         event_loss = losses.get('event_loss', torch.tensor(0.0, device=device))
+        conversion_point_loss = losses.get('conversion_point_loss', torch.tensor(0.0, device=device))
         
         # These are total losses, not average per-event losses
         total_train_loss += total_loss.item() * B
-        total_train_point_loss += point_loss.item() * B
+        total_train_point_category_loss += point_loss.item() * B
         total_train_event_loss += event_loss.item() * B
+        total_train_conversion_point_loss += conversion_point_loss.item() * B
         
         # Backward pass
         total_loss.backward()
@@ -155,8 +202,9 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
             
             wandb.log({
                 'train/batch_loss': np.sum(batch_losses) / num_train_events,
-                'train/batch_point_loss': np.mean(batch_point_losses),
+                'train/batch_point_category_loss': np.mean(batch_point_losses),
                 'train/batch_event_loss': np.mean(batch_event_losses),
+                'train/batch_conversion_point_loss': conversion_point_loss.item(),
                 'train/batch_point_accuracy': np.mean(batch_point_accuracies),
                 'train/batch_gradient_norm': grad_norm,
                 'train/batch_id': batch_idx,
@@ -167,22 +215,25 @@ def train_step(model, train_dataloader, optimizer, device, epoch, args, rng=None
             'Loss': f'{total_loss.item():.4f}',
             'Point_Loss': f'{point_loss.item():.4f}',
             'Event_Loss': f'{event_loss.item():.4f}',
+            'Conversion_Loss': f'{conversion_point_loss.item():.4f}',
         })
 
     loss = total_train_loss / num_train_events
-    point_loss = total_train_point_loss / num_train_events
+    point_loss = total_train_point_category_loss / num_train_events
     event_loss = total_train_event_loss / num_train_events
+    conversion_point_loss = total_train_conversion_point_loss / num_train_events
     point_accuracy = total_train_correct_points / total_train_num_points
 
-    return loss, point_loss, event_loss, point_accuracy
+    return loss, point_loss, event_loss, conversion_point_loss, point_accuracy
 
 
 def test_step(model, test_dataloader, device, epoch, args):
 
     model.eval()
     total_test_loss = 0.0
-    total_test_point_loss = 0.0
+    total_test_point_category_loss = 0.0
     total_test_event_loss = 0.0
+    total_test_conversion_point_loss = 0.0
     total_test_correct_points = 0
     total_test_num_points = 0
 
@@ -202,6 +253,9 @@ def test_step(model, test_dataloader, device, epoch, args):
     # for event-level score histogram
     all_event_probs = []
     all_event_true_labels = []
+    # for per-event max predicted conversion score distribution
+    all_event_max_pred_conv_scores = []
+    all_event_max_pred_conv_true_labels = []
     
     # for spacepoint-level visualization
     num_spacepoint_plot_events = 8
@@ -220,7 +274,7 @@ def test_step(model, test_dataloader, device, epoch, args):
 
     with torch.no_grad():
         test_pbar = tqdm(test_dataloader, desc=f'Epoch {epoch+1}/{args.num_epochs} [Test] ')
-        for batch_idx, (batch_features, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords) in enumerate(test_pbar):
+        for batch_idx, (batch_features, batch_labels, batch_event_y, batch_indices, batch_pair_conversion_coords, batch_point_conversion_scores) in enumerate(test_pbar):
             # batch_coords has shape (total_points, 3) - all points from all events concatenated
             # batch_labels has shape (total_points,) - all labels concatenated
             # batch_event_y has shape (batch_size,) - event-level labels
@@ -252,10 +306,14 @@ def test_step(model, test_dataloader, device, epoch, args):
             # Forward pass
             predictions = model(data_dict)
             
+            # Use precomputed per-point conversion scores from dataloader
+            point_conversion_scores = batch_point_conversion_scores.to(device)
+
             # Prepare targets for loss computation
             targets = {
                 'point_labels': batch_labels,
-                'event_labels': batch_event_y
+                'event_labels': batch_event_y,
+                'point_conversion_scores': point_conversion_scores,
             }
             
             # Compute loss using model's compute_loss method
@@ -265,12 +323,14 @@ def test_step(model, test_dataloader, device, epoch, args):
             # Extract individual losses for logging
             point_loss = losses.get('point_loss', torch.tensor(0.0, device=device))
             event_loss = losses.get('event_loss', torch.tensor(0.0, device=device))
+            conversion_point_loss = losses.get('conversion_point_loss', torch.tensor(0.0, device=device))
             
             # These are total losses, not average per-event losses
             total_test_loss += total_loss.item() * B
-            total_test_point_loss += point_loss.item() * B
+            total_test_point_category_loss += point_loss.item() * B
             total_test_event_loss += event_loss.item() * B
-            
+            total_test_conversion_point_loss += conversion_point_loss.item() * B
+
             # Statistics for point-wise predictions
             point_features = predictions['point_features']
             point_logits = point_features.feat  # [total_points, num_classes]
@@ -280,23 +340,40 @@ def test_step(model, test_dataloader, device, epoch, args):
             total_test_num_points += batch_labels.size(0)
             total_test_correct_points += (predicted == batch_labels).sum().item()
 
-            # For visualization, separate predictions and labels by event
+            # For visualization, separate predictions and labels by event using model offsets
             predicted_by_event = []
             true_labels_by_event = []
             coords_by_event = []
             probabilities_by_event = []
-            
-            for i in range(B):
-                event_mask = (batch_indices == i)
-                event_pred = predicted[event_mask].cpu().numpy()
-                event_true = batch_labels[event_mask].cpu().numpy()
-                event_coords = batch_coords[event_mask].cpu().numpy()
-                event_probs = point_probs[event_mask].cpu().numpy()
-                
+            pred_conversion_by_event = []
+            true_conversion_by_event = []
+
+            conversion_logits = predictions['conversion_logits'].squeeze(-1)
+            offsets = predictions['point_features'].offset
+            ordered_coords = predictions['point_features'].coord
+            if len(offsets) > 0 and offsets[0] != 0:
+                offsets = torch.cat([torch.tensor([0], device=offsets.device, dtype=offsets.dtype), offsets])
+
+            num_events_in_batch = len(offsets) - 1
+            for i in range(num_events_in_batch):
+                start_idx = offsets[i]
+                end_idx = offsets[i + 1]
+
+                event_pred = predicted[start_idx:end_idx].cpu().numpy()
+                event_true = batch_labels[start_idx:end_idx].cpu().numpy()
+                # Use coordinates in the same ordering as model outputs to keep lengths consistent
+                event_coords = ordered_coords[start_idx:end_idx].cpu().numpy()
+                event_probs = point_probs[start_idx:end_idx].cpu().numpy()
+
+                event_pred_conv = torch.sigmoid(conversion_logits[start_idx:end_idx]).cpu().numpy()
+                event_true_conv = point_conversion_scores[start_idx:end_idx].cpu().numpy()
+
                 predicted_by_event.append(event_pred)
                 true_labels_by_event.append(event_true)
                 coords_by_event.append(event_coords)
                 probabilities_by_event.append(event_probs)
+                pred_conversion_by_event.append(event_pred_conv)
+                true_conversion_by_event.append(event_true_conv)
             
             # Calculate batch-level metrics
             batch_point_accuracy = 100 * (predicted == batch_labels).sum().item() / batch_labels.size(0)
@@ -311,8 +388,9 @@ def test_step(model, test_dataloader, device, epoch, args):
             if args.wandb:
                 wandb.log({
                     'test/batch_loss': total_loss.item(),
-                    'test/batch_point_loss': point_loss.item(),
+                    'test/batch_point_category_loss': point_loss.item(),
                     'test/batch_event_loss': event_loss.item(),
+                    'test/batch_conversion_point_loss': conversion_point_loss.item(),
                     'test/batch_point_accuracy': batch_point_accuracy,
                     'test/batch': batch_idx,
                 })
@@ -326,6 +404,11 @@ def test_step(model, test_dataloader, device, epoch, args):
                 event_probs = torch.softmax(predictions['event_logits'], dim=1)[:, 1].cpu().numpy()
                 all_event_probs.extend(event_probs)
                 all_event_true_labels.extend(batch_event_y.cpu().numpy())
+
+                # Collect per-event maximum predicted conversion score
+                for i in range(num_events_in_batch):
+                    all_event_max_pred_conv_scores.append(float(np.max(pred_conversion_by_event[i])))
+                    all_event_max_pred_conv_true_labels.append(int(batch_event_y[i].item()))
 
                 for event_i in range(B):
                     if len(subset_sig_point_predictions) < num_spacepoint_plot_events and batch_event_y[event_i] == 1:
@@ -342,11 +425,48 @@ def test_step(model, test_dataloader, device, epoch, args):
                         subset_bkg_event_predictions.append(event_probs[event_i])
                         subset_bkg_event_true_labels.append(batch_event_y[event_i])
                         subset_bkg_pair_conversion_coords.append(batch_pair_conversion_coords[event_i])
+
+                # Create conversion score plots for these events
+                for event_i in range(len(predicted_by_event)):
+                    fig, (pred_ax, true_ax) = plt.subplots(1, 2, figsize=(12, 6))
+                    s = 0.2
+
+                    # Predicted conversion score scatter
+                    pred_ax.scatter(coords_by_event[event_i][:, 2], coords_by_event[event_i][:, 0], s=s,
+                                    c=pred_conversion_by_event[event_i], cmap='viridis', vmin=0, vmax=1)
+                    pred_ax.set_title('Predicted Conversion Score')
+                    pred_ax.set_xlabel('Z')
+                    pred_ax.set_ylabel('X')
+                    pred_ax.set_xticks([])
+                    pred_ax.set_yticks([])
+
+                    # True exponential falloff target scatter (use model-ordered slices to match lengths)
+                    coords_ev = coords_by_event[event_i]
+                    true_scores_ev = true_conversion_by_event[event_i]
+                    true_ax.scatter(coords_ev[:, 2], coords_ev[:, 0], s=s,
+                                    c=true_scores_ev, cmap='viridis', vmin=0, vmax=1)
+                    # Overlay true conversion points as red stars
+                    if len(batch_pair_conversion_coords[event_i]) > 0:
+                        pair_x = [coord[2] for coord in batch_pair_conversion_coords[event_i]]
+                        pair_y = [coord[0] for coord in batch_pair_conversion_coords[event_i]]
+                        true_ax.scatter(pair_x, pair_y, s=50, c='red', marker='*', edgecolors='black', linewidth=0.5)
+
+                    true_ax.set_title('True Exponential Falloff Target')
+                    true_ax.set_xlabel('Z')
+                    true_ax.set_ylabel('X')
+                    true_ax.set_xticks([])
+                    true_ax.set_yticks([])
+
+                    fig.tight_layout()
+                    img_path = f'{args.outdir}/plots/conversion_score_plots/event_{batch_idx}_{event_i}.png'
+                    fig.savefig(img_path, dpi=300)
+                    plt.close(fig)
             
             test_pbar.set_postfix({
                 'Loss': f'{total_loss.item():.4f}',
                 'Point_Loss': f'{point_loss.item():.4f}',
                 'Event_Loss': f'{event_loss.item():.4f}',
+                'Conversion_Point_Loss': f'{conversion_point_loss.item():.4f}',
             })
     
     # Create extra test plots
@@ -406,6 +526,19 @@ def test_step(model, test_dataloader, device, epoch, args):
         event_score_fig.tight_layout()
 
         event_score_fig.savefig(f'{args.outdir}/plots/event_score_fig.jpg', dpi=300)
+
+        # Create histogram of per-event max predicted conversion scores
+        max_pred_conv_scores = np.array(all_event_max_pred_conv_scores)
+        max_pred_conv_true_labels = np.array(all_event_max_pred_conv_true_labels)
+
+        max_conv_fig, max_conv_ax = plt.subplots(figsize=(8, 6))
+        max_conv_ax.hist(max_pred_conv_scores[max_pred_conv_true_labels == 1], bins=bins, histtype='step', label='Signal events', linewidth=lw, density=True)
+        max_conv_ax.hist(max_pred_conv_scores[max_pred_conv_true_labels == 0], bins=bins, histtype='step', label='Background events', linewidth=lw, density=True)
+        max_conv_ax.legend()
+        max_conv_ax.set_xlabel('Max Predicted Conversion Score per Event')
+        max_conv_ax.set_ylabel('Relative Number of Events')
+        max_conv_fig.tight_layout()
+        max_conv_fig.savefig(f'{args.outdir}/plots/max_pred_conversion_score_hist.jpg', dpi=300)
 
         # create efficiency curve and AUC curve
         all_signal_plus_background_probs = np.concatenate([true_signal_probs, true_background_probs])
@@ -643,6 +776,19 @@ def test_step(model, test_dataloader, device, epoch, args):
                                                  row["Predicted Signal Probability"], 
                                                  row["True Signal Label"]] for row in spacepoint_table_data])
 
+        # Log a few conversion score plots to wandb
+        if args.wandb:
+            conv_images = []
+            # pick up to 8 images saved in the conversion score dir
+            try:
+                file_list = sorted([f for f in os.listdir(f'{args.outdir}/plots/conversion_score_plots') if f.endswith('.png')])
+                for fpath in file_list[:8]:
+                    conv_images.append(wandb.Image(f"{args.outdir}/plots/conversion_score_plots/{fpath}"))
+                if len(conv_images) > 0:
+                    wandb.log({'test/conversion_score_plots': conv_images})
+            except Exception:
+                pass
+
         # Create point probability distribution plot
         # Flatten all probabilities and labels
         flattened_probs = []
@@ -695,11 +841,13 @@ def test_step(model, test_dataloader, device, epoch, args):
         plt.close(point_prob_fig)
         plt.close(efficiency_fig)
         plt.close(auc_fig)
+        plt.close(max_conv_fig)
 
         if args.wandb:
             wandb.log({
                 'test/point_confusion_matrix': wandb.Image(point_confusion_fig),
                 'test/event_score_histogram': wandb.Image(event_score_fig),
+                'test/max_pred_conversion_histogram': wandb.Image(max_conv_fig),
                 'test/point_category_histogram': wandb.Image(point_category_fig),
                 'test/point_probability_distribution': wandb.Image(point_prob_fig),
                 'test/spacepoint_visualization_table': spacepoint_table if spacepoint_table_data else None,
@@ -708,11 +856,12 @@ def test_step(model, test_dataloader, device, epoch, args):
             })
 
     loss = total_test_loss / num_test_events
-    point_loss = total_test_point_loss / num_test_events
+    point_loss = total_test_point_category_loss / num_test_events
     event_loss = total_test_event_loss / num_test_events
+    conversion_point_loss = total_test_conversion_point_loss / num_test_events
     point_accuracy = total_test_correct_points / total_test_num_points
     
-    return loss, point_loss, event_loss, point_accuracy
+    return loss, point_loss, event_loss, conversion_point_loss, point_accuracy
 
 
 if __name__ == "__main__":
@@ -735,6 +884,7 @@ if __name__ == "__main__":
     parser.add_argument('--wandb_entity', type=str, required=False, help='Wandb entity/username.', default=None)
     parser.add_argument('--name', type=str, required=False, help='Wandb run name.', default=None)
 
+    parser.add_argument('--point_category_loss_weight', type=float, required=False, help='Weight of point category loss.', default=1.0)
     parser.add_argument('--event_loss_weight', type=float, required=False, help='Weight of event loss.', default=1.0)
 
     parser.add_argument('--model_settings', type=str, required=False, help='Model settings.', default={'type': 'MultiTaskPointTransformerV3', 'grid_size': 0.01})
@@ -756,6 +906,8 @@ if __name__ == "__main__":
     parser.add_argument('--gamma_one_side_loss_weight', type=float, required=False, help='Weight of gamma one side loss.', default=0)
     parser.add_argument('--train_random_rotation', action='store_true', required=False, help='Apply random 3D rotations to training data for data augmentation.')
 
+    parser.add_argument('--conversion_point_loss_weight', type=float, required=False, help='Weight of conversion point loss.', default=0)
+
     args = parser.parse_args()
 
     if args.name is not None:
@@ -768,6 +920,7 @@ if __name__ == "__main__":
         os.makedirs(args.outdir, exist_ok=True)
         os.makedirs(f'{args.outdir}/plots', exist_ok=True)
         os.makedirs(f'{args.outdir}/plots/spacepoint_plots', exist_ok=True)
+        os.makedirs(f'{args.outdir}/plots/conversion_score_plots', exist_ok=True)
 
     print("Pytorch version: ", torch.__version__)
     if torch.backends.mps.is_available():
@@ -798,6 +951,7 @@ if __name__ == "__main__":
         'model_settings': args.model_settings,
         'scheduler_settings': args.scheduler_settings,
         'event_loss_weight': args.event_loss_weight,
+        'point_category_loss_weight': args.point_category_loss_weight,
         'permutation_gamma_loss': args.permutation_gamma_loss,
         'gamma_separation_loss_weight': args.gamma_separation_loss_weight,
         'gamma_KL_loss_weight': args.gamma_KL_loss_weight,
@@ -805,7 +959,8 @@ if __name__ == "__main__":
         'variance_loss_weight': args.variance_loss_weight,
         'near_05_loss_weight': args.near_05_loss_weight,
         'gamma_one_side_loss_weight': args.gamma_one_side_loss_weight,
-
+        'conversion_point_loss_weight': args.conversion_point_loss_weight,
+        
         'learning_rate': args.learning_rate,
         'weight_decay': args.weight_decay,
 
@@ -864,7 +1019,7 @@ if __name__ == "__main__":
     print(f"Testing batches: {len(test_dataloader)}")
     
     # Get a sample batch to determine input dimensions
-    sample_batch_coords, sample_batch_labels, sample_batch_event_y, sample_batch_indices, sample_batch_pair_conversion_coords = next(iter(train_dataloader))
+    sample_batch_coords, sample_batch_labels, sample_batch_event_y, sample_batch_indices, sample_batch_pair_conversion_coords, sample_batch_point_conversion_scores = next(iter(train_dataloader))
     
     # Determine number of classes from the data
     num_point_classes = 4
@@ -878,7 +1033,7 @@ if __name__ == "__main__":
     model = MultiTaskPointTransformerV3(
         num_classes=4,          # true gamma 1, true gamma 2, other particles, cosmic
         num_event_classes=2,    # signal 1g, background 2g
-        event_loss_weight=1.0,
+        event_loss_weight=args.event_loss_weight,
         in_channels=in_channels,
         permutation_gamma_loss=args.permutation_gamma_loss,
         gamma_separation_loss_weight=args.gamma_separation_loss_weight,
@@ -887,6 +1042,8 @@ if __name__ == "__main__":
         variance_loss_weight=args.variance_loss_weight,
         near_05_loss_weight=args.near_05_loss_weight,
         gamma_one_side_loss_weight=args.gamma_one_side_loss_weight,
+        conversion_point_loss_weight=args.conversion_point_loss_weight,
+        point_category_loss_weight=args.point_category_loss_weight,
     )
     model = model.to(device)
     
@@ -931,12 +1088,12 @@ if __name__ == "__main__":
     for epoch in range(-1, args.num_epochs):
 
         if epoch == -1: # testing the random network before any training
-            test_loss, test_point_loss, test_event_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
+            test_loss, test_point_category_loss, test_event_loss, test_conversion_point_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
             # train and test should be the same for the inital random network before any training happens
-            train_loss, train_point_loss, train_event_loss, train_point_accuracy = test_loss, test_point_loss, test_event_loss, test_point_accuracy
+            train_loss, train_point_category_loss, train_event_loss, train_conversion_point_loss, train_point_accuracy = test_loss, test_point_category_loss, test_event_loss, test_conversion_point_loss, test_point_accuracy
         else:
-            train_loss, train_point_loss, train_event_loss, train_point_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args, rng)
-            test_loss, test_point_loss, test_event_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
+            train_loss, train_point_category_loss, train_event_loss, train_conversion_point_loss, train_point_accuracy = train_step(model, train_dataloader, optimizer, device, epoch, args, rng)
+            test_loss, test_point_category_loss, test_event_loss, test_conversion_point_loss, test_point_accuracy = test_step(model, test_dataloader, device, epoch, args)
 
         if test_loss < best_test_loss: # save the best model
             best_test_loss = test_loss
@@ -960,12 +1117,14 @@ if __name__ == "__main__":
                 'epoch': epoch,
                 'learning_rate': optimizer.param_groups[0]['lr'],
                 'train/loss': train_loss,
-                'train/point_loss': train_point_loss,
+                'train/point_category_loss': train_point_category_loss,
                 'train/event_loss': train_event_loss,
+                'train/conversion_point_loss': train_conversion_point_loss,
                 'train/point_accuracy': train_point_accuracy,
                 'test/loss': test_loss,
-                'test/point_loss': test_point_loss,
+                'test/point_category_loss': test_point_category_loss,
                 'test/event_loss': test_event_loss,
+                'test/conversion_point_loss': test_conversion_point_loss,
                 'test/point_accuracy': test_point_accuracy,
             })
 

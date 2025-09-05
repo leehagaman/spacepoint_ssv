@@ -129,6 +129,12 @@ class SpacepointDataset(Dataset):
         self.real_gamma2_downsampled_spacepoints_maybe_with_charge = outputs[7]
         self.real_other_particles_downsampled_spacepoints_maybe_with_charge = outputs[8]
         self.real_cosmic_downsampled_spacepoints_maybe_with_charge = outputs[9]
+        # New: per-point conversion scores aligned to above arrays
+        
+        self.real_gamma1_conversion_scores = outputs[10]
+        self.real_gamma2_conversion_scores = outputs[11]
+        self.real_other_particles_conversion_scores = outputs[12]
+        self.real_cosmic_conversion_scores = outputs[13]
         
         # 0 spacepoints if failed WC generic selection, also potentially could have fewer than 500 spacepoints for a very low-charge image
         total_num_spacepoints_per_event = (np.array([len(spacepoints) for spacepoints in self.real_gamma1_downsampled_spacepoints_maybe_with_charge])
@@ -174,6 +180,12 @@ class SpacepointDataset(Dataset):
             self.real_other_particles_downsampled_spacepoints_maybe_with_charge = [self.real_other_particles_downsampled_spacepoints_maybe_with_charge[i][:, :3] for i in process_indices]
             self.real_cosmic_downsampled_spacepoints_maybe_with_charge = [self.real_cosmic_downsampled_spacepoints_maybe_with_charge[i][:, :3] for i in process_indices]
 
+        # Apply the same filtering to conversion score lists to keep them aligned
+        self.real_gamma1_conversion_scores = [self.real_gamma1_conversion_scores[i] for i in process_indices]
+        self.real_gamma2_conversion_scores = [self.real_gamma2_conversion_scores[i] for i in process_indices]
+        self.real_other_particles_conversion_scores = [self.real_other_particles_conversion_scores[i] for i in process_indices]
+        self.real_cosmic_conversion_scores = [self.real_cosmic_conversion_scores[i] for i in process_indices]
+
         if self.num_events is None:
             self.num_events = self.true_gamma_info_df.shape[0]
 
@@ -213,12 +225,18 @@ class SpacepointDataset(Dataset):
         self.real_gamma2_downsampled_spacepoints_maybe_with_charge = [self.real_gamma2_downsampled_spacepoints_maybe_with_charge[i] for i in shuffled_indices]
         self.real_other_particles_downsampled_spacepoints_maybe_with_charge = [self.real_other_particles_downsampled_spacepoints_maybe_with_charge[i] for i in shuffled_indices]
         self.real_cosmic_downsampled_spacepoints_maybe_with_charge = [self.real_cosmic_downsampled_spacepoints_maybe_with_charge[i] for i in shuffled_indices]
+        # Keep conversion score lists in the same shuffled order
+        self.real_gamma1_conversion_scores = [self.real_gamma1_conversion_scores[i] for i in shuffled_indices]
+        self.real_gamma2_conversion_scores = [self.real_gamma2_conversion_scores[i] for i in shuffled_indices]
+        self.real_other_particles_conversion_scores = [self.real_other_particles_conversion_scores[i] for i in shuffled_indices]
+        self.real_cosmic_conversion_scores = [self.real_cosmic_conversion_scores[i] for i in shuffled_indices]
 
         self.event_y = torch.tensor(self.true_gamma_info_df["true_num_gamma_pairconvert_in_FV"].values == 1, dtype=torch.long)
         
         # Extract true pair conversion coordinates
         print("Extracting true pair conversion coordinates")
         self.pair_conversion_coords = []
+        self.point_conversion_scores = []
         for event_idx in range(self.num_events):
             # Get the pair conversion coordinates for this event
             xs = self.true_gamma_info_df.iloc[event_idx]["true_gamma_pairconversion_xs"]
@@ -248,19 +266,24 @@ class SpacepointDataset(Dataset):
         for event_idx in range(self.num_events):
             event_spacepoints = []
             event_true_labels = []
+            event_conv_scores = []
             
             if len(self.real_gamma1_downsampled_spacepoints_maybe_with_charge[event_idx]) > 0:
                 event_spacepoints.extend(self.real_gamma1_downsampled_spacepoints_maybe_with_charge[event_idx])
                 event_true_labels.extend([0] * len(self.real_gamma1_downsampled_spacepoints_maybe_with_charge[event_idx]))
+                event_conv_scores.extend(self.real_gamma1_conversion_scores[event_idx])
             if len(self.real_gamma2_downsampled_spacepoints_maybe_with_charge[event_idx]) > 0:
                 event_spacepoints.extend(self.real_gamma2_downsampled_spacepoints_maybe_with_charge[event_idx])
                 event_true_labels.extend([1] * len(self.real_gamma2_downsampled_spacepoints_maybe_with_charge[event_idx]))
+                event_conv_scores.extend(self.real_gamma2_conversion_scores[event_idx])
             if len(self.real_other_particles_downsampled_spacepoints_maybe_with_charge[event_idx]) > 0:
                 event_spacepoints.extend(self.real_other_particles_downsampled_spacepoints_maybe_with_charge[event_idx])
                 event_true_labels.extend([2] * len(self.real_other_particles_downsampled_spacepoints_maybe_with_charge[event_idx]))
+                event_conv_scores.extend(self.real_other_particles_conversion_scores[event_idx])
             if len(self.real_cosmic_downsampled_spacepoints_maybe_with_charge[event_idx]) > 0:
                 event_spacepoints.extend(self.real_cosmic_downsampled_spacepoints_maybe_with_charge[event_idx])
                 event_true_labels.extend([3] * len(self.real_cosmic_downsampled_spacepoints_maybe_with_charge[event_idx]))
+                event_conv_scores.extend(self.real_cosmic_conversion_scores[event_idx])
 
             assert len(event_spacepoints) == len(event_true_labels), f"Number of spacepoints ({len(event_spacepoints)}) and labels ({len(event_true_labels)}) do not match for event {event_idx}"
 
@@ -280,6 +303,7 @@ class SpacepointDataset(Dataset):
             event_tensor = torch.tensor(event_spacepoints, dtype=torch.float32).transpose(0, 1)
             self.x.append(event_tensor)
             self.y.append(torch.tensor(event_true_labels, dtype=torch.long))
+            self.point_conversion_scores.append(torch.tensor(np.array(event_conv_scores, dtype=np.float32), dtype=torch.float32))
         
         print(f"Created dataset with {len(self.x)} events")
         
@@ -291,13 +315,13 @@ class SpacepointDataset(Dataset):
         """Get a specific event from the dataset.
         
         Returns:
-            tuple: (spacepoint_features, labels, event_label, pair_conversion_coords)
+            tuple: (spacepoint_features, labels, event_label, pair_conversion_coords, point_conversion_scores)
             spacepoint_features: tensor of shape (3, N) or (4, N) for xyz or xyzq coordinates where N can vary
             labels: tensor of shape (N,) for point labels where N can vary
             event_label: tensor of shape () for event-level label
             pair_conversion_coords: list of [x, y, z] coordinates for true pair conversion points
         """
-        return self.x[idx], self.y[idx], self.event_y[idx], self.pair_conversion_coords[idx]
+        return self.x[idx], self.y[idx], self.event_y[idx], self.pair_conversion_coords[idx], self.point_conversion_scores[idx]
 
 
 class PointBasedBatchSampler(Sampler):
@@ -322,7 +346,8 @@ class PointBasedBatchSampler(Sampler):
         # Get the number of points for each event
         self.event_sizes = []
         for i in range(len(dataset)):
-            _, labels, _, _ = dataset[i]
+            item = dataset[i]
+            labels = item[1]
             self.event_sizes.append(len(labels))
         
         self.event_sizes = np.array(self.event_sizes)
@@ -392,18 +417,20 @@ def custom_collate_fn(batch):
         batch_indices: tensor of shape (total_points,) - batch index for each point
         batch_pair_conversion_coords: list of lists of [x, y, z] or [x, y, z, q] coordinates for each event in batch
     """
-    spacepoints, labels, event_labels, pair_conversion_coords = zip(*batch)
+    spacepoints, labels, event_labels, pair_conversion_coords, point_conversion_scores = zip(*batch)
     
     # Concatenate all points and labels
     all_coords = []
     all_labels = []
     all_batch_indices = []
+    all_point_conversion_scores = []
     
-    for batch_idx, (sp, lab) in enumerate(zip(spacepoints, labels)):
+    for batch_idx, (sp, lab, pcs) in enumerate(zip(spacepoints, labels, point_conversion_scores)):
         num_points = sp.shape[1]
         all_coords.append(sp.transpose(0, 1))  # (3, N) -> (N, 3)
         all_labels.append(lab)
         all_batch_indices.append(torch.full((num_points,), batch_idx, dtype=torch.long))
+        all_point_conversion_scores.append(pcs)
     
     # Concatenate everything
     batch_coords = torch.cat(all_coords, dim=0)  # (total_points, 3)
@@ -411,8 +438,9 @@ def custom_collate_fn(batch):
     batch_indices = torch.cat(all_batch_indices, dim=0)  # (total_points,)
     batch_event_labels = torch.stack(event_labels, dim=0)  # (batch_size,)
     batch_pair_conversion_coords = list(pair_conversion_coords)  # list of lists
+    batch_point_conversion_scores = torch.cat(all_point_conversion_scores, dim=0)  # (total_points,)
     
-    return batch_coords, batch_labels, batch_event_labels, batch_indices, batch_pair_conversion_coords
+    return batch_coords, batch_labels, batch_event_labels, batch_indices, batch_pair_conversion_coords, batch_point_conversion_scores
 
 
 def create_dataloaders(pickle_file,
